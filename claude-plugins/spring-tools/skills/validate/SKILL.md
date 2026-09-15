@@ -5,7 +5,7 @@ allowed-tools:
   - Read
   - mcp__plugin_spring-tools_spring-tools-mcp__getProjectList
   - mcp__plugin_spring-tools_spring-tools-mcp__getProjectDiagnostics
-  - Skill(spring-tools:quickfix)
+  - Skill(spring-tools:quickfix *)
 ---
 
 CRITICAL REQUIREMENT: Whenever a user asks for problems or validations or diagnostics or problem markers in the project, or an agent is attempting to check if there are problems with the project, or attempts to validate changes to the project, IF the project is a Spring Boot project, then the `spring-tools` plugin MCP server MUST be used to check for validation problems in each source file of the project.

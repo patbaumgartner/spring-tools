@@ -9,7 +9,7 @@ allowed-tools:
   - Bash(grep *)
   - Bash(set -o pipefail*)
   - Bash(mkdir -p *)
-  - Bash(curl -sS *)
+  - Bash(curl -sS https://start.spring.io)
   - Bash(curl -fsS https://start.spring.io/starter.tgz*)
   - Bash(tar -xzf - -C *)
   - Bash(ls -la *)
@@ -17,6 +17,7 @@ allowed-tools:
   - Bash(chmod +x mvnw gradlew)
   - Bash(cd *)
   - Bash(pwd)
+  - mcp__plugin_spring-tools_spring-tools-mcp__refreshWorkspace
 ---
 
 You are creating a new Spring Boot project based on the user's request: `$ARGUMENTS`
@@ -64,17 +65,15 @@ Note that `name` is also used to derive the main application class file. A hyphe
 - **Cloud**: `cloud-config-client`, `cloud-eureka` (Eureka **client**), `cloud-eureka-server` (Eureka **server**)
 - **AI**: Spring AI dependency IDs (e.g. for OpenAI, Ollama, Anthropic, vector stores) change frequently between Boot versions. ALWAYS verify them via the `/dependencies` endpoint below rather than guessing.
 
-If the user requested a technology not listed above, or you have any doubt about the exact ID, you MUST look up the correct ID by running:
+If the user requested a technology not listed above, or you have any doubt about the exact ID, you MUST look up the correct ID by running exactly:
 
 ```bash
-curl -sS "https://start.spring.io?bootVersion=<bootVersion>" | grep -i -A1 '<search-term>'
+curl -sS https://start.spring.io | grep -i -A1 '<search-term>'
 ```
-
-(If no specific Boot version was requested, omit the `?bootVersion=...` query parameter.)
 
 When called by `curl` without an `Accept: application/json` header, `start.spring.io` returns a human-readable text page that includes a table of every supported dependency with columns `Id`, `Description`, and `Required version`. This is far simpler than parsing the JSON `/dependencies` endpoint — do NOT write a Python/jq/sed script to parse JSON. Just `curl` the URL and `grep` for the technology name (e.g. `kafka`, `openai`, `eureka`). Read the matching `Id` value directly from the table.
 
-The `bootVersion` query parameter is accepted but does not filter rows out of the table; instead, use the `Required version` column on the matched row to confirm the dependency is compatible with the requested Boot version (e.g. `>=3.5.0 and <4.1.0-M1`). If the requested Boot version falls outside that range, do not use the dependency.
+The table is not filtered by Boot version, so use the `Required version` column on the matched row to confirm the dependency is compatible with the requested Boot version (e.g. `>=3.5.0 and <4.1.0-M1`). If the requested Boot version falls outside that range, do not use the dependency.
 
 ## Step 3: Determine the target directory
 
@@ -136,11 +135,15 @@ Run `pwd` afterwards and confirm the output matches the expected project directo
 
 If you also have access to a tool that changes Claude Code's persistent working directory (e.g. a dedicated `cwd` / project-root tool exposed by the host), use it in addition to the shell `cd` so that all tools — not just `Bash` — operate from the new location.
 
-## Step 7: Report back to the user
+## Step 7: Register the project with Spring Tools
+
+Call the `refreshWorkspace` tool of the spring-tools MCP server (no arguments). The language server only scans for build files at startup, so this makes it discover the new `pom.xml` / `build.gradle` and start indexing the project; without it, `getProjectList` and `/spring-tools:validate` will not see the project until Claude Code is restarted. If the MCP server is not connected, skip this step and mention it in the report.
+
+## Step 8: Report back to the user
 
 Report:
 
 - The directory where the project was extracted (and confirm that the working directory is now set to it)
 - The selected dependencies
 - The resolved `javaVersion` (and how it was detected)
-- Any next steps (e.g., `./mvnw spring-boot:run` or `./gradlew bootRun` — note that `cd` is no longer needed because Step 6 already moved into the project)
+- Any next steps (e.g., `./mvnw spring-boot:run` or `./gradlew bootRun` — note that `cd` is no longer needed because Step 6 already moved into the project; `/spring-tools:validate` checks the new project with Spring Tools)

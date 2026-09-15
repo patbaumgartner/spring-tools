@@ -10,10 +10,10 @@
  *******************************************************************************/
 
 // Consistency rules between the Claude plugin configuration (manifest, hooks,
-// skills) and the MCP tools implemented by the language server.
+// skills, agents) and the MCP tools implemented by the language server.
 
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 
 export const MCP_SOURCES_DIR = 'headless-services/spring-boot-language-server/src/main/java/org/springframework/ide/vscode/boot/mcp';
 export const PLUGIN_DIR = 'claude-plugins/spring-tools';
@@ -158,18 +158,38 @@ function hookEntries(hooksJson) {
     return result;
 }
 
-/** Validates hooks.json against the MCP tool inventory; returns error strings. */
-export function checkHooks(hooksJson, tools) {
+/** Validates hooks.json against the MCP tool inventory (and, given the repo root, the plugin files); returns error strings. */
+export function checkHooks(hooksJson, tools, root) {
     const errors = [];
     const entries = hookEntries(hooksJson);
     if (entries.length === 0) {
         errors.push('hooks.json declares no hooks');
     }
     for (const { event, hook } of entries) {
+        const where = `${event} hook '${hook.if ?? hook.tool ?? hook.command}'`;
+        if (hook.if !== undefined && !/^(Bash|PowerShell|Edit|Read|WebFetch|Skill|Agent|mcp__[\w-]+)\(.+\)$/.test(hook.if)) {
+            errors.push(`${where}: 'if' must be a single permission rule like Edit(*.java) or Bash(git *)`);
+        }
+        if (hook.type === 'command') {
+            if (typeof hook.command !== 'string' || !hook.command) {
+                errors.push(`${where}: command hook without a command`);
+            } else if (hook.command.includes('${CLAUDE_PLUGIN_ROOT}') && !Array.isArray(hook.args)) {
+                errors.push(`${where}: path placeholders belong in exec-form 'args', not in a shell-form command`);
+            }
+            for (const arg of hook.args ?? []) {
+                const prefix = '${CLAUDE_PLUGIN_ROOT}/';
+                if (root && arg.startsWith(prefix) && !existsSync(join(root, PLUGIN_DIR, arg.slice(prefix.length)))) {
+                    errors.push(`${where}: '${arg}' does not exist in the plugin directory`);
+                }
+            }
+            continue;
+        }
         if (hook.type !== 'mcp_tool') {
             continue;
         }
-        const where = `${event} hook '${hook.if ?? hook.tool}'`;
+        if (event === 'SessionStart' || event === 'Setup') {
+            errors.push(`${where}: Claude Code skips mcp_tool hooks on ${event} at launch (no MCP client context yet); use a command hook`);
+        }
         if (hook.server !== HOOK_SERVER) {
             errors.push(`${where}: server must be '${HOOK_SERVER}', found '${hook.server}'`);
         }
@@ -214,19 +234,199 @@ export function checkSkill(dirName, text, tools, skillNames) {
                 errors.push(`${dirName}: unknown MCP tool '${entry.slice(SCOPED_TOOL_PREFIX.length)}'`);
             }
         }
-        const skillRef = entry.match(/^Skill\(([^:)]+):([^)]+)\)$/);
+        // Skill(plugin:name) only matches an argument-less call; Skill(plugin:name *) also covers arguments.
+        const skillRef = entry.match(/^Skill\(([^:)\s]+):([^)\s]+)( \*)?\)$/);
         if (skillRef) {
             if (skillRef[1] !== PLUGIN_NAME) {
                 errors.push(`${dirName}: skill reference '${entry}' uses plugin '${skillRef[1]}'`);
             } else if (!skillNames.includes(skillRef[2])) {
                 errors.push(`${dirName}: skill reference '${entry}' points to a missing skill`);
             }
+        } else if (entry.startsWith('Skill(')) {
+            errors.push(`${dirName}: skill reference '${entry}' must look like Skill(${PLUGIN_NAME}:<skill>) or Skill(${PLUGIN_NAME}:<skill> *)`);
         }
     }
-    for (const match of text.matchAll(/`((?:get|file|refresh)[A-Z]\w*)`/g)) {
+    for (const match of text.matchAll(/`((?:get|file|refresh|find|capture|clear)[A-Z]\w*)`/g)) {
         if (!tools.has(match[1])) {
             errors.push(`${dirName}: body mentions MCP tool '${match[1]}' which does not exist`);
         }
+    }
+    return errors;
+}
+
+/** MCP tool names referenced by a skill's allowed-tools (scoped entries only). */
+export function skillToolNames(text) {
+    const front = parseFrontMatter(text);
+    const allowed = Array.isArray(front?.['allowed-tools']) ? front['allowed-tools'] : (front?.['allowed-tools'] ? String(front['allowed-tools']).split(',').map((s) => s.trim()) : []);
+    return allowed.filter((e) => e.startsWith(SCOPED_TOOL_PREFIX)).map((e) => e.slice(SCOPED_TOOL_PREFIX.length));
+}
+
+/**
+ * Validates one agents/<name>.md file (Claude Code sub-agent). Agents shipped in a plugin need a
+ * name matching the file, a description, and may only grant MCP tools of the plugin's own server.
+ */
+export function checkAgent(fileName, text, tools) {
+    const errors = [];
+    const expectedName = basename(fileName).replace(/\.md$/, '');
+    const front = parseFrontMatter(text);
+    if (!front) {
+        return [`${fileName}: agent file has no YAML front matter`];
+    }
+    if (front.name !== expectedName) {
+        errors.push(`${fileName}: front matter name '${front.name}' differs from file name '${expectedName}'`);
+    }
+    if (!front.description || String(front.description).length < 20) {
+        errors.push(`${fileName}: missing or too short description (Claude uses it to decide when to delegate)`);
+    }
+    for (const key of ['hooks', 'mcpServers', 'permissionMode']) {
+        if (front[key] !== undefined) {
+            errors.push(`${fileName}: '${key}' is ignored for agents shipped in a plugin`);
+        }
+    }
+    const granted = Array.isArray(front.tools) ? front.tools : (front.tools ? String(front.tools).split(',').map((s) => s.trim()) : []);
+    for (const entry of granted) {
+        if (!entry.startsWith('mcp__')) {
+            continue;
+        }
+        if (entry === `${SCOPED_TOOL_PREFIX}*` || entry === SCOPED_TOOL_PREFIX.slice(0, -2)) {
+            continue;
+        }
+        if (!entry.startsWith(SCOPED_TOOL_PREFIX)) {
+            errors.push(`${fileName}: MCP tool '${entry}' is not scoped with '${SCOPED_TOOL_PREFIX}'`);
+        } else if (!tools.has(entry.slice(SCOPED_TOOL_PREFIX.length))) {
+            errors.push(`${fileName}: unknown MCP tool '${entry.slice(SCOPED_TOOL_PREFIX.length)}'`);
+        }
+    }
+    for (const match of text.matchAll(/`((?:get|file|refresh|find|capture|clear)[A-Z]\w*)`/g)) {
+        if (!tools.has(match[1])) {
+            errors.push(`${fileName}: body mentions MCP tool '${match[1]}' which does not exist`);
+        }
+    }
+    return errors;
+}
+
+/**
+ * Every MCP tool the language server exposes must be reachable through a documented path: an
+ * allowed-tools entry of some skill or an mcp_tool hook. Returns the tool names that are not.
+ */
+export function uncoveredTools(tools, skillTexts, hooksJson) {
+    const covered = new Set();
+    for (const text of skillTexts) {
+        for (const name of skillToolNames(text)) {
+            covered.add(name);
+        }
+    }
+    for (const { hook } of hookEntries(hooksJson ?? {})) {
+        if (hook.type === 'mcp_tool' && hook.tool) {
+            covered.add(hook.tool);
+        }
+    }
+    return [...tools.keys()].filter((name) => !covered.has(name)).sort();
+}
+
+/**
+ * Consistency of the behavioral eval suite (claude plugin eval) with the rest of the plugin: every
+ * mock answers a real tool, every case has a prompt and at least one grader, graders reference
+ * only real tools/skills/agents, and every skill and agent has at least one case that checks it.
+ * Returns error strings.
+ */
+export function checkEvals(evalsDir, tools, skillNames, agentNames) {
+    const errors = [];
+    if (!existsSync(evalsDir)) {
+        return [`evals directory ${evalsDir} is missing`];
+    }
+    const mockDirs = [join(evalsDir, 'mocks', MCP_SERVER_NAME)];
+    const cases = readdirSync(evalsDir).filter((d) => !['mocks', 'results'].includes(d) && statSync(join(evalsDir, d)).isDirectory());
+    if (cases.length === 0) {
+        errors.push('evals: no cases');
+    }
+    const coveredSkills = new Set();
+    const coveredAgents = new Set();
+    for (const name of cases) {
+        const caseDir = join(evalsDir, name);
+        const promptFile = join(caseDir, 'prompt.md');
+        if (!existsSync(promptFile)) {
+            errors.push(`evals/${name}: prompt.md is missing`);
+            continue;
+        }
+        const prompt = readFileSync(promptFile, 'utf8');
+        if (!prompt.replace(/^---[\s\S]*?\n---/, '').trim()) {
+            errors.push(`evals/${name}: prompt body is empty`);
+        }
+        const gradersDir = join(caseDir, 'graders');
+        const graders = existsSync(gradersDir) ? readdirSync(gradersDir).filter((f) => f.endsWith('.md')) : [];
+        if (graders.length === 0) {
+            errors.push(`evals/${name}: no graders`);
+        }
+        for (const grader of graders) {
+            const data = parseFrontMatter(readFileSync(join(gradersDir, grader), 'utf8'));
+            if (!data?.type) {
+                errors.push(`evals/${name}/graders/${grader}: no type in front matter`);
+                continue;
+            }
+            if (data.type !== 'tool_used') {
+                continue;
+            }
+            const tool = data.tool ?? '';
+            if (tool.startsWith(SCOPED_TOOL_PREFIX) && !tools.has(tool.slice(SCOPED_TOOL_PREFIX.length))) {
+                errors.push(`evals/${name}/graders/${grader}: MCP tool '${tool}' does not exist`);
+            }
+            if (tool === 'Skill' && data.input_match) {
+                const skill = data.input_match.match(/\)\?([\w-]+)"/)?.[1];
+                if (skill && !skillNames.includes(skill)) {
+                    errors.push(`evals/${name}/graders/${grader}: skill '${skill}' does not exist`);
+                }
+                if (skill && data.max !== '0') {
+                    coveredSkills.add(skill);
+                }
+            }
+            if (tool === 'Agent' && data.input_match) {
+                if (!agentNames.includes(data.input_match)) {
+                    errors.push(`evals/${name}/graders/${grader}: agent '${data.input_match}' does not exist`);
+                }
+                coveredAgents.add(data.input_match);
+            }
+        }
+        const caseMocks = join(caseDir, 'mocks', MCP_SERVER_NAME);
+        if (existsSync(caseMocks)) {
+            mockDirs.push(caseMocks);
+        }
+    }
+    for (const dir of mockDirs) {
+        if (!existsSync(dir)) {
+            errors.push(`evals: mock directory ${dir} is missing`);
+            continue;
+        }
+        for (const file of readdirSync(dir).filter((f) => f.endsWith('.md'))) {
+            const tool = basename(file, '.md');
+            if (!tools.has(tool)) {
+                errors.push(`evals: mock ${file} answers unknown tool '${tool}'`);
+            }
+        }
+    }
+    const suiteMocks = mockDirs[0];
+    if (existsSync(suiteMocks)) {
+        const mocked = new Set(readdirSync(suiteMocks).filter((f) => f.endsWith('.md')).map((f) => basename(f, '.md')));
+        const unmocked = [...tools.keys()].filter((t) => !mocked.has(t)).sort();
+        if (unmocked.length) {
+            errors.push(`evals: tools without a suite-wide mock (re-run claude-plugins/tools/evals/record-mocks.mjs): ${unmocked.join(', ')}`);
+        }
+        const toolsJson = join(suiteMocks, '_tools.json');
+        if (!existsSync(toolsJson)) {
+            errors.push('evals: mocks/_tools.json (saved tools/list) is missing');
+        } else {
+            const listed = new Set((JSON.parse(readFileSync(toolsJson, 'utf8')).tools ?? []).map((t) => t.name));
+            const stale = [...tools.keys()].filter((t) => !listed.has(t)).concat([...listed].filter((t) => !tools.has(t))).sort();
+            if (stale.length) {
+                errors.push(`evals: mocks/_tools.json differs from the language server's tools (re-record): ${stale.join(', ')}`);
+            }
+        }
+    }
+    for (const skill of skillNames.filter((s) => !coveredSkills.has(s))) {
+        errors.push(`evals: skill '${skill}' has no case asserting it fires`);
+    }
+    for (const agent of agentNames.filter((a) => !coveredAgents.has(a))) {
+        errors.push(`evals: agent '${agent}' has no case asserting it is used`);
     }
     return errors;
 }
