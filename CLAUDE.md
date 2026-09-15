@@ -148,6 +148,7 @@ IDE Client (VSCode/Eclipse) ←—LSP over stdio/socket—→ Java Language Serv
 
 - The full Spring Boot LS (`spring-boot-language-server`) requires JDT Language Server in the same process for Java type resolution
 - The standalone variant (`spring-boot-language-server-standalone`) resolves types via Maven/Gradle classpath + Jandex indexing — used by the Claude Code plugin
+- In the plugin the LSP transport is disabled (`-Dlanguageserver.enabled=false`), so no document is ever "open": the `getProjectDiagnostics` MCP tool only sees what the indexers produce — Java diagnostics from `SpringIndexerJava`, config-file diagnostics (`application*`, `bootstrap*`, `*.factories`) from `SpringIndexerConfigFiles`, plus the build-file version validation
 
 ### Key Commons Modules
 

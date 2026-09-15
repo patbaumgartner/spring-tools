@@ -24,6 +24,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.context.ApplicationContext;
 import org.springframework.ide.vscode.boot.factories.SpringFactoriesLanguageServerComponents;
+import org.springframework.ide.vscode.boot.factories.SpringFactoriesReconcileEngine;
 import org.springframework.ide.vscode.boot.index.cache.IndexCache;
 import org.springframework.ide.vscode.boot.java.BootJavaLanguageServerComponents;
 import org.springframework.ide.vscode.boot.java.data.jpa.queries.HqlSemanticTokens;
@@ -39,6 +40,7 @@ import org.springframework.ide.vscode.boot.java.utils.CompilationUnitCache;
 import org.springframework.ide.vscode.boot.maven.PomLanguageServerComponents;
 import org.springframework.ide.vscode.boot.metadata.ProjectBasedPropertyIndexProvider;
 import org.springframework.ide.vscode.boot.properties.BootPropertiesLanguageServerComponents;
+import org.springframework.ide.vscode.boot.properties.BootPropertiesReconcileEngine;
 import org.springframework.ide.vscode.boot.validation.generations.MavenMetadataProvider;
 import org.springframework.ide.vscode.boot.validation.generations.SpringProjectsProvider;
 import org.springframework.ide.vscode.boot.xml.SpringXMLLanguageServerComponents;
@@ -128,10 +130,10 @@ public class BootLanguageServerInitializer implements InitializingBean {
 		// some server intialization code. Migrate that code and get rid of the ComposableLanguageServer class
 		CompositeLanguageServerComponents.Builder builder = new CompositeLanguageServerComponents.Builder();
 		List<LanguageServerComponents> componentsList = List.of(
-			new BootPropertiesLanguageServerComponents(server, params, javaElementLocationProvider, parser, yamlStructureProvider, yamlAssistContextProvider, sourceLinks),
+			new BootPropertiesLanguageServerComponents(server, params, javaElementLocationProvider, parser, yamlStructureProvider, yamlAssistContextProvider, sourceLinks, appContext.getBean(BootPropertiesReconcileEngine.class)),
 			new BootJavaLanguageServerComponents(appContext),
 			new SpringXMLLanguageServerComponents(server, springIndexer, params, config, appContext.getBean(SpelReconciler.class)),
-			new SpringFactoriesLanguageServerComponents(projectFinder, springIndexer, config),
+			new SpringFactoriesLanguageServerComponents(appContext.getBean(SpringFactoriesReconcileEngine.class), springIndexer),
 			new PomLanguageServerComponents(server, projectFinder, params.projectObserver, appContext.getBean(SpringProjectsProvider.class), appContext.getBean(MavenMetadataProvider.class), appContext.getBean(BootJavaConfig.class)),
 			new JpaQueryPropertiesLanguageServerComponents(server.getTextDocumentService(), projectFinder, appContext.getBean(JpqlSemanticTokens.class),
 					appContext.getBean(HqlSemanticTokens.class), appContext.getBean(JpqlSupportState.class), (Reconciler) appContext.getBean("hqlReconciler"), (Reconciler) appContext.getBean("jpqlReconciler"))

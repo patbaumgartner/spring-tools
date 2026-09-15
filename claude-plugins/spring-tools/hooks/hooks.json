@@ -87,6 +87,16 @@
           },
           {
             "type": "mcp_tool",
+            "if": "Edit(*.factories)",
+            "server": "plugin:spring-tools:spring-tools-mcp",
+            "tool": "fileChanged",
+            "input": {
+              "filePath": "${tool_input.file_path}"
+            },
+            "timeout": 30
+          },
+          {
+            "type": "mcp_tool",
             "if": "Edit(*.gradle)",
             "server": "plugin:spring-tools:spring-tools-mcp",
             "tool": "fileChanged",

@@ -146,7 +146,7 @@ Settings are applied once at startup. You must restart the language server for c
 
 Via MCP tools:
 
-- **Diagnostics** — Spring-specific warnings and quick fixes (missing annotations, incorrect bean wiring, etc.), including version validation results and `application.properties` / `application.yml` checks (unknown or deprecated properties, type mismatches, structural errors)
+- **Diagnostics** — Spring-specific warnings and quick fixes (missing annotations, incorrect bean wiring, etc.), including version validation results and checks of `application.properties` / `application.yml` / `META-INF/spring.factories` (unknown or deprecated properties, type mismatches, structural errors, unsupported factories keys). Config files under test resources are only included when `boot-java.scan-java-test-sources.on=true` is set (see below)
 - **Project insight** — bean, component, and request-mapping lookups; resolved project classpath
 
 Via skills (invoked as `/spring-tools:<name>`, or automatically by Claude when relevant):
@@ -156,7 +156,7 @@ Via skills (invoked as `/spring-tools:<name>`, or automatically by Claude when r
 - **`create-spring-boot-project`** — scaffolds a new project from start.spring.io
 - **`refresh`** — forces the language server to re-index the workspace from disk
 
-Via hooks (`hooks/hooks.json`), the plugin also tracks file and project changes on disk to keep its internal index up to date. The file-change hooks fire after `Edit`/`Write` tool calls on Java/Kotlin/Groovy source files and build/config files (`.java`, `.kt`, `.kts`, `.groovy`, `.xml`, `.properties`, `.yml`, `.yaml`, `.gradle`) — edits to unrelated files don't trigger them. The workspace-refresh hook fires after `git` and `rm` shell commands (and their PowerShell equivalents), since those can change files without going through Claude's file tools.
+Via hooks (`hooks/hooks.json`), the plugin also tracks file and project changes on disk to keep its internal index up to date. The file-change hooks fire after `Edit`/`Write` tool calls on Java/Kotlin/Groovy source files and build/config files (`.java`, `.kt`, `.kts`, `.groovy`, `.xml`, `.properties`, `.yml`, `.yaml`, `.factories`, `.gradle`) — edits to unrelated files don't trigger them. The workspace-refresh hook fires after `git` and `rm` shell commands (and their PowerShell equivalents), since those can change files without going through Claude's file tools.
 
 ## Explanation playbooks
 

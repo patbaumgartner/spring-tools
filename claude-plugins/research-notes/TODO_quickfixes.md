@@ -37,7 +37,7 @@ When a new problem type is added to the language server, add a row to the matchi
 | Problem Type Code | Description | Quick Fix Implementation | Playbook |
 | :--- | :--- | :--- | :---: |
 | `JAVA_TYPE_NOT_SUPPORTED` | Type not supported as of Spring Boot 3 | *None* | ✅ |
-| `FACTORIES_KEY_NOT_SUPPORTED` | Spring factories key not supported | *None* | ✅ |
+| `FACTORIES_KEY_NOT_SUPPORTED` | Spring factories key not supported (`META-INF/spring.factories`, reconciled for open documents and by `SpringIndexerConfigFiles` during indexing) | *None* | ✅ |
 | `MODULITH_TYPE_REF_VIOLATION` | Modulith restricted type reference | *None* | ✅ |
 | `MODULITH_APPLICATION_MODULE_LISTENER` | `@Async` + `@Transactional` + `@TransactionalEventListener` could use `@ApplicationModuleListener` | JDT Refactoring (`ApplicationModuleListenerReconciler` / `ApplicationModuleListenerRefactoring`) | ✅ |
 
@@ -100,7 +100,7 @@ Not an enum: all `VersionValidationProblemType` checks (OSS/commercial support e
 
 ## Properties Config File Problem Types (`properties/reconcile/ApplicationPropertiesProblemType`)
 
-Raised on `application*.properties` / `bootstrap*.properties` files by `SpringPropertiesReconcileEngine` (plus `PropertyNavigator` for the bracket/dot navigation codes). Severity is configured per code via `spring-boot.ls.problem.application-properties.<CODE>`.
+Raised on `application*.properties` / `bootstrap*.properties` files by `SpringPropertiesReconcileEngine` (plus `PropertyNavigator` for the bracket/dot navigation codes). Severity is configured per code via `spring-boot.ls.problem.application-properties.<CODE>`. Besides the document reconciler for open files, `SpringIndexerConfigFiles` runs the same engine over the project's config files during indexing so that `getProjectDiagnostics` reports these codes without an editor.
 
 | Problem Type Code | Description | Quick Fix Implementation | Playbook |
 | :--- | :--- | :--- | :---: |
@@ -118,7 +118,7 @@ Raised on `application*.properties` / `bootstrap*.properties` files by `SpringPr
 
 ## YAML Config File Problem Types (`yaml/reconcile/ApplicationYamlProblemType`)
 
-Raised on `application*.yml`/`.yaml` and `bootstrap*.yml`/`.yaml` files by `ApplicationYamlReconcileEngine` / `ApplicationYamlASTReconciler`. Severity is configured per code via `spring-boot.ls.problem.application-yaml.<CODE>`. The last row is not an enum constant: the reconciler flattens `<<` merge keys with commons-yaml's `NodeMergeSupport`, which reports malformed merge values under the generic `YamlSchemaProblem` code (severity key `spring-boot.ls.problem.yaml-schema-problems.YamlSchemaProblem`).
+Raised on `application*.yml`/`.yaml` and `bootstrap*.yml`/`.yaml` files by `ApplicationYamlReconcileEngine` / `ApplicationYamlASTReconciler`, both for open documents and - via `SpringIndexerConfigFiles` - for every config file of an indexed project, so `getProjectDiagnostics` reports these codes without an editor. Severity is configured per code via `spring-boot.ls.problem.application-yaml.<CODE>`. The last row is not an enum constant: the reconciler flattens `<<` merge keys with commons-yaml's `NodeMergeSupport`, which reports malformed merge values under the generic `YamlSchemaProblem` code (severity key `spring-boot.ls.problem.yaml-schema-problems.YamlSchemaProblem`).
 
 | Problem Type Code | Description | Quick Fix Implementation | Playbook |
 | :--- | :--- | :--- | :---: |
