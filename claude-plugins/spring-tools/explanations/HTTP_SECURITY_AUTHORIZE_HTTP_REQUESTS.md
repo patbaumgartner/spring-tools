@@ -66,7 +66,7 @@ public SecurityFilterChain filterChain(HttpSecurity http) throws Exception {
 }
 ```
 
-**Legacy request matchers:** if the rules still use `antMatchers(...)`, `mvcMatchers(...)` or `regexMatchers(...)` (deprecated in Spring Security 5.8, removed in 6.0), migrate them to `requestMatchers(...)` as part of this fix; likewise `web.ignoring().antMatchers(...)` → `requestMatchers(...)` and `csrf.ignoringAntMatchers(...)` → `ignoringRequestMatchers(...)`. `requestMatchers` picks the most appropriate `RequestMatcher` for the application; for an explicit regular expression use `requestMatchers(RegexRequestMatcher.regexMatcher("..."))`. The quick fix itself does not touch the matcher calls, and the `TODO` comment it inserts (see below) still speaks of an `antMatcher(...)` call - read that as the request-matcher call, i.e. `requestMatchers(...)`.
+**Legacy request matchers:** if the rules still use `antMatchers(...)`, `mvcMatchers(...)` or `regexMatchers(...)` (deprecated in Spring Security 5.8, removed in 6.0), migrate them to `requestMatchers(...)` as part of this fix; likewise `web.ignoring().antMatchers(...)` → `requestMatchers(...)` and `csrf.ignoringAntMatchers(...)` → `ignoringRequestMatchers(...)`. `requestMatchers` picks the most appropriate `RequestMatcher` for the application; for an explicit regular expression use `requestMatchers(RegexRequestMatcher.regexMatcher("..."))`. The quick fix itself does not touch the matcher calls.
 
 **Spring Security 7 (Spring Boot 4):** the chained style without lambdas (`.authorizeHttpRequests().requestMatchers(...)...`) is not valid anymore in 7.0, so convert to the Lambda DSL in the same step (see `JAVA_LAMBDA_DSL`). The result then matches the current documentation:
 ```java
@@ -116,7 +116,7 @@ public SecurityFilterChain filterChain(HttpSecurity http) throws Exception {
 public SecurityFilterChain filterChain(HttpSecurity http) throws Exception {
     http
         .authorizeHttpRequests()
-            /*TODO: replace removed '.accessDecisionManager(myAccessDecisionManager);' with appropriate call to 'access(AuthorizationManager)' after antMatcher(...) call etc.*/
+            /*TODO: replace removed '.accessDecisionManager(myAccessDecisionManager);' with appropriate call to 'access(AuthorizationManager)' after requestMatchers(...) call etc.*/
             .requestMatchers("/blog/**").permitAll()
             .anyRequest().authenticated();
     return http.build();

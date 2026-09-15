@@ -90,7 +90,8 @@ Flat `key=value` format where each key is the full dot-separated settings path. 
 ```properties
 # Category enablement toggles (AUTO / ON / OFF)
 boot-java.validation.java.boot2=OFF
-boot-java.validation.java.boot3=ON
+boot-java.validation.java.boot3=AUTO
+boot-java.validation.java.boot4=ON
 boot-java.validation.spel.on=ON
 boot-java.validation.java.version-validation=OFF
 
@@ -109,10 +110,11 @@ Nested JSON matching the VSCode `boot-java` / `spring-boot` configuration struct
     "validation": {
       "java": {
         "boot2": "OFF",
-        "boot3": "ON"
+        "boot3": "AUTO",
+        "boot4": "ON",
+        "version-validation": "OFF"
       },
-      "spel": { "on": "ON" },
-      "version-validation": { "on": "OFF" }
+      "spel": { "on": "ON" }
     }
   },
   "spring-boot": {
@@ -130,11 +132,13 @@ Nested JSON matching the VSCode `boot-java` / `spring-boot` configuration struct
 
 ### Available settings
 
-**Category enablement toggles** (`boot-java.validation.*`) accept `AUTO`, `ON`, or `OFF`.
+**Category enablement toggles** (`boot-java.validation.*`) accept `AUTO`, `ON`, or `OFF`. `AUTO` (the default for the `boot2`/`boot3`/`boot4` categories) applies a category only when the project's Spring Boot version matches it, `ON` forces it on for every Spring Boot project regardless of version (for example to see Boot 4 findings while still on Boot 3), and `OFF` disables it. The `spring-aot`, `spel`, `version-validation`, `data-query`, `cron` and `spring-ai` categories only support `ON`/`OFF`; the `application-properties` and `application-yaml` categories have no toggle — silence individual codes with a severity of `IGNORE` instead.
 
 **Per-problem severity overrides** (`spring-boot.ls.problem.<category>.<code>`) accept `IGNORE`, `HINT`, `INFO`, `WARNING`, or `ERROR`.
 
-The full list of available categories and problem codes is embedded in the language server JAR as `problem-types.json`. They are the same keys used in the VSCode extension's settings.
+**Per-problem parameters** (`spring-boot.ls.problem-parameters.<category>.<code>.<key>`) tune individual checks, for example `spring-boot.ls.problem-parameters.spring-ai.SPRING_AI_TOOL_DESCRIPTION_TOO_SHORT.minimum-length=40`; the version-validation category has a category-wide parameter `spring-boot.ls.problem-parameters.version-validation.use-project-build-file=false` (look up available versions on spring.io instead of the project's Maven repositories).
+
+The full list of available categories, problem codes and parameters is embedded in the language server JAR as `problem-types.json` (inside the nested `spring-boot-language-server-*.jar`). They are the same keys used in the VSCode extension's settings, so the `boot-java.*` / `spring-boot.*` entries of `vscode-extensions/vscode-spring-boot/package.json` double as a reference.
 
 Settings are applied once at startup. You must restart the language server for changes to take effect: restart Claude Code, or reconnect the `spring-tools-mcp` server from the `/mcp` menu.
 
@@ -142,7 +146,7 @@ Settings are applied once at startup. You must restart the language server for c
 
 Via MCP tools:
 
-- **Diagnostics** — Spring-specific warnings and quick fixes (missing annotations, incorrect bean wiring, etc.), including version validation results
+- **Diagnostics** — Spring-specific warnings and quick fixes (missing annotations, incorrect bean wiring, etc.), including version validation results and `application.properties` / `application.yml` checks (unknown or deprecated properties, type mismatches, structural errors)
 - **Project insight** — bean, component, and request-mapping lookups; resolved project classpath
 
 Via skills (invoked as `/spring-tools:<name>`, or automatically by Claude when relevant):
@@ -153,6 +157,41 @@ Via skills (invoked as `/spring-tools:<name>`, or automatically by Claude when r
 - **`refresh`** — forces the language server to re-index the workspace from disk
 
 Via hooks (`hooks/hooks.json`), the plugin also tracks file and project changes on disk to keep its internal index up to date. The file-change hooks fire after `Edit`/`Write` tool calls on Java/Kotlin/Groovy source files and build/config files (`.java`, `.kt`, `.kts`, `.groovy`, `.xml`, `.properties`, `.yml`, `.yaml`, `.gradle`) — edits to unrelated files don't trigger them. The workspace-refresh hook fires after `git` and `rm` shell commands (and their PowerShell equivalents), since those can change files without going through Claude's file tools.
+
+## Explanation playbooks
+
+Every diagnostic the language server can report through `getProjectDiagnostics` carries a `code` (for example `JAVA_PUBLIC_BEAN_METHOD`). For each code there is one Markdown playbook `explanations/<CODE>.md` that the `quickfix` skill reads before touching the user's code. A playbook has two sections:
+
+- `## Explanations` — what the diagnostic flags, why it matters, when the language server raises it (Spring/Boot version range, required dependency, what exactly is inspected), and a `For more details, see:` list of official documentation links.
+- `## Fixes` — one or more `**Fix N: …**` blocks with prose and *Before:* / *After:* code blocks. Cross-references to other diagnostics are written as backticked codes (for example ``see `JAVA_LAMBDA_DSL` ``) and must point to an existing playbook.
+
+The codes come from the `*ProblemType` enums of the language server (`Boot2JavaProblemType`, `Boot3JavaProblemType`, `Boot4JavaProblemType`, `SpringAotJavaProblemType`, `SpringAiProblemType`, `SpelProblemType`, `cron/CronProblemType`, `data/jpa/queries/QueryProblemType`, `properties/reconcile/ApplicationPropertiesProblemType`, `yaml/reconcile/ApplicationYamlProblemType`) plus two codes that are not enum constants: `BOOT_VERSION_VALIDATION_CODE`, which all Spring Boot version-validation diagnostics share, and `YamlSchemaProblem`, which the YAML reconciler inherits from `commons-yaml` for malformed `<<` merge keys. Coverage is tracked in [`research-notes/TODO_quickfixes.md`](../research-notes/TODO_quickfixes.md).
+
+### Keeping the playbooks consistent
+
+`claude-plugins/tools/` contains a Node.js checker and tests (Node 20+, no dependencies) that keep the playbooks and the plugin configuration in sync with the language server. Run them from the repository root:
+
+```bash
+# every code has a playbook, no orphan files, structure/cross-references valid, TODO table in sync
+node claude-plugins/tools/check-explanations.mjs --require-all --todo
+
+# additionally verify that every documentation link returns HTTP 200
+node claude-plugins/tools/check-explanations.mjs --require-all --links
+
+# only a subset (e.g. while writing a new playbook)
+node claude-plugins/tools/check-explanations.mjs --codes JAVA_PUBLIC_BEAN_METHOD,JAVA_LAMBDA_DSL --links
+
+# tests: checker behaviour (incl. negative-control fixtures), hooks/skills/manifest consistency with the MCP tools
+node --test --test-reporter=spec 'claude-plugins/tools/test/*.test.mjs'
+```
+
+The GitHub Actions workflow `.github/workflows/claude-plugin-check.yml` runs the same checks for changes under `claude-plugins/`, the `*ProblemType` enums and the MCP tool sources, and validates the manifest with `claude plugin validate --strict`.
+
+When a new diagnostic code is added to the language server:
+
+1. Create `explanations/<CODE>.md` following the structure above; verify every fact against the reconciler that raises the code and against the current Spring documentation, and prefer the current API (state deprecation/removal versions when showing an older one).
+2. Add a row to the coverage table in `research-notes/TODO_quickfixes.md`.
+3. Run the checker with `--require-all --todo --links` until it passes.
 
 ## Plugin structure
 
@@ -171,9 +210,11 @@ spring-tools/
 │   ├── quickfix/
 │   ├── create-spring-boot-project/
 │   └── refresh/
-├── explanations/            # Markdown files with problem explanations and fixes
+├── explanations/            # One Markdown playbook per diagnostic code (explanation + fixes)
 └── README.md
 ```
+
+The sibling directory `claude-plugins/tools/` (not part of the published plugin) holds `check-explanations.mjs`, `lib/plugin-config.mjs` and the `test/` suite described above.
 
 ## How it works
 

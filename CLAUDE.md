@@ -31,7 +31,9 @@ sts4/
 │   └── boot-dev-pack/          # Extension pack bundling Spring Boot extensions
 ├── nodejs-packages/            # Shared Node.js utilities
 └── claude-plugins/             # Claude Code plugin (standalone LS + MCP server)
-    ├── spring-tools/           # Plugin source
+    ├── spring-tools/           # Plugin source (skills, hooks, explanations/<CODE>.md playbooks)
+    ├── tools/                  # Node.js checker + tests keeping playbooks in sync with the *ProblemType enums
+    ├── research-notes/         # TODO_quickfixes.md: problem code → quick fix → playbook coverage table
     └── update-local-jars.sh    # Rebuilds the standalone LS JAR for the plugin
 ```
 
@@ -90,6 +92,13 @@ The `claude-plugins/spring-tools` plugin uses the **standalone** language server
 ```bash
 cd claude-plugins
 ./update-local-jars.sh    # Rebuild and copy the standalone LS JAR into the plugin
+```
+
+Every diagnostic code (the `*ProblemType` enums plus `BOOT_VERSION_VALIDATION_CODE`) needs a playbook `claude-plugins/spring-tools/explanations/<CODE>.md` and a row in `claude-plugins/research-notes/TODO_quickfixes.md`. When adding or renaming a problem type, run from the repository root:
+
+```bash
+node claude-plugins/tools/check-explanations.mjs --require-all --todo --links
+node --test --test-reporter=spec 'claude-plugins/tools/test/*.test.mjs'
 ```
 
 ## Running Tests

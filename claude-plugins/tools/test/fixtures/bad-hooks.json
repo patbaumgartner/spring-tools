@@ -1,0 +1,25 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "mcp_tool",
+            "if": "Edit(*.java)",
+            "server": "plugin:spring-tools:spring-tools-mcp",
+            "tool": "fileChangd",
+            "input": { "filePath": "${tool_input.file_path}" }
+          },
+          {
+            "type": "mcp_tool",
+            "if": "Edit(*.kt)",
+            "server": "spring-tools-mcp",
+            "tool": "fileChanged",
+            "input": { "path": "${tool_input.file_path}" }
+          }
+        ]
+      }
+    ]
+  }
+}
