@@ -20,7 +20,7 @@ allowed-tools:
   - mcp__plugin_spring-tools_spring-tools-mcp__refreshWorkspace
 ---
 
-You are creating a new Spring Boot project based on the user's request: `$ARGUMENTS`
+Create a new Spring Boot project based on the user's request and any details in the current conversation. Apply the user's requested name, features, and options; ask only for information that cannot be reasonably defaulted.
 
 ## Step 1: Detect the available JDK version
 
@@ -137,7 +137,7 @@ If you also have access to a tool that changes Claude Code's persistent working 
 
 ## Step 7: Register the project with Spring Tools
 
-Call the `refreshWorkspace` tool of the spring-tools MCP server (no arguments). The language server only scans for build files at startup, so this makes it discover the new `pom.xml` / `build.gradle` and start indexing the project; without it, `getProjectList` and `/spring-tools:validate` will not see the project until Claude Code is restarted. If the MCP server is not connected, skip this step and mention it in the report.
+Call the `refreshWorkspace` tool of the spring-tools MCP server (no arguments). The language server only scans for build files at startup, so this makes it discover the new `pom.xml` / `build.gradle` and start indexing the project; without it, `getProjectList` and the `validate` skill will not see the project until the host reconnects the server. If the MCP server is not connected, skip this step and mention it in the report.
 
 ## Step 8: Report back to the user
 
@@ -146,4 +146,4 @@ Report:
 - The directory where the project was extracted (and confirm that the working directory is now set to it)
 - The selected dependencies
 - The resolved `javaVersion` (and how it was detected)
-- Any next steps (e.g., `./mvnw spring-boot:run` or `./gradlew bootRun` — note that `cd` is no longer needed because Step 6 already moved into the project; `/spring-tools:validate` checks the new project with Spring Tools)
+- Any next steps (e.g., `./mvnw spring-boot:run` or `./gradlew bootRun` — note that `cd` is no longer needed because Step 6 already moved into the project; the `validate` skill checks the new project with Spring Tools)

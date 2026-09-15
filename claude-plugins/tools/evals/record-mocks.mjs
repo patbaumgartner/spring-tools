@@ -21,15 +21,17 @@
 //   node claude-plugins/tools/evals/record-mocks.mjs [--project-src <dir>]
 
 import { spawn } from 'node:child_process';
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir, homedir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
+import { createRequire } from 'node:module';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(here, '..', '..', '..');
 const pluginDir = join(repoRoot, 'claude-plugins', 'spring-tools');
+const { defaultInstallDir } = createRequire(import.meta.url)(join(pluginDir, 'install.js'));
 const mocksDir = join(pluginDir, 'evals', 'mocks', 'spring-tools-mcp');
 // Case-level override: the fixture only yields version diagnostics by itself, so the validate case
 // gets a recording taken after a redundant @Autowired constructor was added to the application class.
@@ -40,11 +42,19 @@ const args = process.argv.slice(2);
 const option = (name) => (args.includes(name) ? args[args.indexOf(name) + 1] : undefined);
 const projectSrc = resolve(option('--project-src') ?? join(repoRoot, 'headless-services/spring-boot-language-server/src/test/resources/test-projects/sf7-validation'));
 
-const jarPath = process.env.SPRING_TOOLS_LS_JAR || join(pluginDir, 'language-server', JAR_NAME);
+// Prefer a fresh test build; otherwise read the same versioned cache as launcher.js.
+const localBuildJar = join(pluginDir, 'language-server', JAR_NAME);
+const jarPath = process.env.SPRING_TOOLS_LS_JAR || (existsSync(localBuildJar) ? localBuildJar : join(defaultInstallDir(pluginDir), JAR_NAME));
 if (!existsSync(jarPath)) {
-    console.error(`language server JAR not found at ${jarPath}; run claude-plugins/update-local-jars.sh or set SPRING_TOOLS_LS_JAR`);
+    console.error(`language server JAR not found at ${jarPath}; build the local test JAR with claude-plugins/update-local-jars.sh or set SPRING_TOOLS_LS_JAR`);
     process.exit(2);
 }
+
+const stagingRoot = mkdtempSync(join(pluginDir, 'evals', '.record-mocks-'));
+const stagedMocksDir = join(stagingRoot, 'suite');
+const stagedValidateMocksDir = join(stagingRoot, 'validate');
+mkdirSync(stagedMocksDir, { recursive: true });
+mkdirSync(stagedValidateMocksDir, { recursive: true });
 
 const work = mkdtempSync(join(tmpdir(), 'spring-tools-eval-record-'));
 const workspace = join(work, 'workspace');
@@ -57,6 +67,7 @@ const child = spawn(process.execPath, [join(pluginDir, 'launcher.js')], {
     env: { ...process.env, CLAUDE_PROJECT_DIR: workspace, CLAUDE_PLUGIN_DATA: dataDir, CLAUDE_PLUGIN_ROOT: pluginDir },
     stdio: ['pipe', 'pipe', 'inherit'],
 });
+const childExited = new Promise((resolvePromise) => child.once('exit', resolvePromise));
 const pending = new Map();
 let nextId = 1;
 createInterface({ input: child.stdout }).on('line', (line) => {
@@ -98,7 +109,7 @@ const pretty = (text) => {
     try { return JSON.stringify(JSON.parse(text), null, 2); } catch { return text; }
 };
 const yaml = (value) => (Array.isArray(value) ? `[${value.join(', ')}]` : value);
-function writeMock(tool, body, expect = {}, dir = mocksDir) {
+function writeMock(tool, body, expect = {}, dir = stagedMocksDir) {
     const front = Object.keys(expect).length
         ? `---\nexpect:\n${Object.entries(expect).map(([k, v]) => `  ${k}: ${yaml(v)}`).join('\n')}\n---\n`
         : '';
@@ -111,10 +122,8 @@ try {
     await request('initialize', { protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: 'record-mocks', version: '0' } });
     child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized', params: {} })}\n`);
 
-    rmSync(mocksDir, { recursive: true, force: true });
-    mkdirSync(mocksDir, { recursive: true });
     const tools = await request('tools/list', {});
-    writeFileSync(join(mocksDir, '_tools.json'), `${JSON.stringify({ tools: tools.result.tools }, null, 2)}\n`);
+    writeFileSync(join(stagedMocksDir, '_tools.json'), `${JSON.stringify({ tools: tools.result.tools }, null, 2)}\n`);
 
     const projectList = await pollUntil(() => call('getProjectList'), (t) => t.includes(`"${projectName}"`), 120, 3000);
     if (!projectList.includes(`"${projectName}"`)) throw new Error(`project ${projectName} was not discovered`);
@@ -165,13 +174,39 @@ try {
     await call('fileChanged', { filePath: application });
     const withJavaDiagnostic = await pollUntil(() => call('getProjectDiagnostics', exact), (t) => t.includes('JAVA_AUTOWIRED_CONSTRUCTOR'), 30, 1000);
     if (!withJavaDiagnostic.includes('JAVA_AUTOWIRED_CONSTRUCTOR')) throw new Error('JAVA_AUTOWIRED_CONSTRUCTOR did not appear after the edit');
-    mkdirSync(validateCaseMocksDir, { recursive: true });
-    writeMock('getProjectDiagnostics', withJavaDiagnostic, exact, validateCaseMocksDir);
+    writeMock('getProjectDiagnostics', withJavaDiagnostic, exact, stagedValidateMocksDir);
     writeFileSync(application, original);
+
+    const replaceDirectory = (staged, target) => {
+        mkdirSync(dirname(target), { recursive: true });
+        const backup = `${target}.backup-${process.pid}`;
+        rmSync(backup, { recursive: true, force: true });
+        if (existsSync(target)) renameSync(target, backup);
+        try {
+            renameSync(staged, target);
+            rmSync(backup, { recursive: true, force: true });
+        } catch (error) {
+            if (existsSync(backup) && !existsSync(target)) renameSync(backup, target);
+            throw error;
+        }
+    };
+    replaceDirectory(stagedMocksDir, mocksDir);
+    replaceDirectory(stagedValidateMocksDir, validateCaseMocksDir);
 
     console.log(`${readdirSync(mocksDir).length} files written to ${mocksDir}`);
 } finally {
     child.kill('SIGTERM');
-    await sleep(2000);
+    const exited = await new Promise((resolvePromise) => {
+        const timer = setTimeout(() => resolvePromise(false), 10000);
+        childExited.then(() => {
+            clearTimeout(timer);
+            resolvePromise(true);
+        });
+    });
+    if (!exited) {
+        child.kill('SIGKILL');
+        await childExited;
+    }
     rmSync(work, { recursive: true, force: true });
+    rmSync(stagingRoot, { recursive: true, force: true });
 }

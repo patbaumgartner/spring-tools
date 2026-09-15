@@ -15,6 +15,6 @@ Answer endpoint questions from the request mapping index of the `spring-tools` M
    - "Which endpoints does the application expose?" / "Give me the API inventory" - `getRequestMappings` with the project name. Present the result as a table of HTTP method, path, handler class and method; group by controller for large projects.
    - "Which endpoints accept `DELETE`?" / "Which handler serves `POST /orders`?" - `findRequestMappingsByMethod` with the project name and the HTTP method (`GET`, `POST`, `PUT`, `DELETE`, `PATCH`), then filter by path.
 3. Read the handler source file only when the answer needs code (request parameters, response type, security annotations); the tool output already contains file paths and line numbers.
-4. For endpoint problems the language server also validates (e.g. `@RequestMapping` on a class without `@Controller`, or conflicting API versions) run `/spring-tools:validate` and fix the reported codes.
+4. For endpoint problems the language server also validates (e.g. `@RequestMapping` on a class without `@Controller`, or conflicting API versions), use the `validate` skill and fix the reported codes.
 
 The index follows on-disk changes automatically (the language server watches the workspace), so a controller added during the session shows up without any refresh. If a very recent edit is not reflected yet, wait a moment and call the tool again.

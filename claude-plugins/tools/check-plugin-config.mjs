@@ -10,18 +10,23 @@
  *     Broadcom - initial API and implementation
  *******************************************************************************/
 
-// Checks the Claude Code plugin configuration against the language server's MCP tools:
+// Checks the plugin configuration against the language server's MCP tools:
 //   node claude-plugins/tools/check-plugin-config.mjs
 // Fails when a hook, skill or agent references an unknown tool, when a skill/agent is malformed,
-// when the manifest is inconsistent, or when an MCP tool is reachable through no skill and no hook.
+// when one of the two client manifests (Claude Code, Agent Plugins 1.0 for Copilot) is inconsistent,
+// or when an MCP tool is reachable through no skill and no hook.
 
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import {
+    COPILOT_DIR,
     PLUGIN_DIR,
     checkAgent,
+    checkAgentPluginManifest,
+    checkCopilotAgent,
+    checkCopilotHooks,
     checkEvals,
     checkHooks,
     checkManifest,
@@ -63,9 +68,59 @@ for (const file of agentFiles) {
     errors.push(...checkAgent(file, readFileSync(join(agentsDir, file), 'utf8'), tools));
 }
 
+// Copilot reads its own copies: com.github.copilot/agents/<name>.agent.md wins over agents/<name>.md.
+const copilotAgentsDir = join(pluginDir, COPILOT_DIR, 'agents');
+const copilotAgentFiles = existsSync(copilotAgentsDir) ? readdirSync(copilotAgentsDir).filter((f) => f.endsWith('.agent.md')) : [];
+for (const file of agentFiles) {
+    if (!copilotAgentFiles.includes(`${file.replace(/\.md$/, '')}.agent.md`)) {
+        errors.push(`${COPILOT_DIR}/agents: no copy of agents/${file}, Copilot would fall back to the Claude front matter`);
+    }
+}
+for (const file of copilotAgentFiles) {
+    const claudeFile = join(agentsDir, file.replace(/\.agent\.md$/, '.md'));
+    errors.push(...checkCopilotAgent(file, readFileSync(join(copilotAgentsDir, file), 'utf8'), existsSync(claudeFile) ? readFileSync(claudeFile, 'utf8') : undefined));
+}
+
+// One portable reviewer procedure is shipped as a skill and rendered into each host's agent format.
+const sharedReviewSkill = readFileSync(join(skillsDir, 'spring-review', 'SKILL.md'), 'utf8');
+const reviewBody = (text) => text.replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n/, '').trim();
+for (const [label, file] of [
+    ['Claude reviewer', join(agentsDir, 'spring-reviewer.md')],
+    ['Copilot reviewer', join(copilotAgentsDir, 'spring-reviewer.agent.md')],
+    ['OpenCode reviewer', join(pluginDir, 'opencode', 'agents', 'spring-reviewer.md')],
+]) {
+    if (!existsSync(file)) {
+        errors.push(`${label}: adapter is missing`);
+    } else if (reviewBody(readFileSync(file, 'utf8')) !== reviewBody(sharedReviewSkill)) {
+        errors.push(`${label}: instructions differ from skills/spring-review/SKILL.md; run sync-agent-adapters.mjs --write`);
+    }
+}
+
+const openCodeConfig = JSON.parse(readFileSync(join(pluginDir, 'opencode', 'opencode.jsonc'), 'utf8'));
+const openCodeServer = openCodeConfig.mcp?.['spring-tools'];
+if (openCodeServer?.type !== 'local' || openCodeServer.command?.[0] !== 'node' || openCodeServer.command?.[1] !== '{env:SPRING_TOOLS_PLUGIN_ROOT}/launcher.js') {
+    errors.push('opencode/opencode.jsonc must launch the shared launcher.js through SPRING_TOOLS_PLUGIN_ROOT');
+}
+if (openCodeServer?.timeout !== 120000 || openCodeServer?.enabled !== true) {
+    errors.push('opencode/opencode.jsonc must enable Spring Tools with a 120000 ms startup timeout');
+}
+const openCodeAgent = readFileSync(join(pluginDir, 'opencode', 'agents', 'spring-reviewer.md'), 'utf8');
+if (!/^mode:\s*subagent$/m.test(openCodeAgent) || !/^\s+edit:\s*deny$/m.test(openCodeAgent) || !/spring-tools_\*"?:\s*allow/.test(openCodeAgent)) {
+    errors.push('OpenCode reviewer must be a read-only subagent with access to spring-tools MCP tools');
+}
+
+const copilotHooks = JSON.parse(readFileSync(join(pluginDir, COPILOT_DIR, 'hooks', 'hooks.json'), 'utf8'));
+errors.push(...checkCopilotHooks(copilotHooks, repoRoot));
+
 const pluginJson = JSON.parse(readFileSync(join(pluginDir, '.claude-plugin', 'plugin.json'), 'utf8'));
 const marketplace = JSON.parse(readFileSync(join(repoRoot, 'claude-plugins', '.claude-plugin', 'marketplace.json'), 'utf8'));
 errors.push(...checkManifest(pluginJson, marketplace, repoRoot));
+errors.push(...checkAgentPluginManifest(
+    JSON.parse(readFileSync(join(pluginDir, 'plugin.json'), 'utf8')),
+    JSON.parse(readFileSync(join(pluginDir, 'mcp.json'), 'utf8')),
+    pluginJson,
+    repoRoot,
+));
 
 const uncovered = uncoveredTools(tools, skillTexts, hooks);
 if (uncovered.length) {
@@ -83,4 +138,4 @@ if (errors.length) {
     console.error(`plugin config FAILED: ${errors.length} problem(s)`);
     process.exit(1);
 }
-console.log(`plugin config OK (${tools.size} tools, ${skillNames.length} skills, ${agentFiles.length} agent(s), ${evalCases} eval case(s), every tool covered by a skill or hook)`);
+console.log(`plugin config OK (${tools.size} tools, ${skillNames.length} skills, ${agentFiles.length} agent(s) with a Copilot copy, ${evalCases} eval case(s), every tool covered by a skill or hook)`);

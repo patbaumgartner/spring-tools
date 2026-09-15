@@ -39,6 +39,7 @@ export const TODO_FILE = 'claude-plugins/research-notes/TODO_quickfixes.md';
 const DOC_LINK = /https:\/\/(?:docs\.spring\.io|spring\.io|github\.com\/spring-projects)\//;
 const URL_PATTERN = /https?:\/\/[^\s)>\]"'`]+/g;
 const CROSS_REF = /`([A-Z][A-Z0-9_]{3,})`/g;
+const LINK_HOSTS = new Set(['docs.spring.io', 'spring.io', 'enterprise.spring.io', 'github.com', 'docs.oracle.com', 'openjdk.org', 'yaml.org', 'raw.githubusercontent.com']);
 
 function walk(dir, predicate, out = []) {
     if (!existsSync(dir)) {
@@ -139,9 +140,23 @@ export function parseTodoTable(text) {
     return result;
 }
 
+function duplicateTodoRows(text) {
+    const seen = new Set();
+    const duplicates = new Set();
+    for (const line of text.split(/\r?\n/)) {
+        const match = line.match(/^\|\s*`([A-Za-z][A-Za-z0-9_]+)`\s*\|.*\|\s*(✅|❌)\s*\|\s*$/);
+        if (!match) continue;
+        if (seen.has(match[1])) duplicates.add(match[1]);
+        seen.add(match[1]);
+    }
+    return [...duplicates].sort();
+}
+
 export function extractUrls(text) {
     const urls = new Set();
-    for (const match of text.matchAll(URL_PATTERN)) {
+    // URLs inside examples are code, not references readers should follow.
+    const prose = text.replace(/^```[\s\S]*?^```\s*/gm, '').replace(/`[^`]*`/g, '');
+    for (const match of prose.matchAll(URL_PATTERN)) {
         let url = match[0].replace(/[).,;:]+$/, '');
         url = url.split('#')[0];
         urls.add(url);
@@ -149,16 +164,48 @@ export function extractUrls(text) {
     return [...urls];
 }
 
+/** Only check links to the documentation hosts maintained by Spring and its project repos. */
+export function allowedDocumentationUrl(value) {
+    try {
+        const url = new URL(value);
+        const host = url.hostname.toLowerCase();
+        if (url.protocol !== 'https:' || !LINK_HOSTS.has(host)) return false;
+        if (host === 'github.com') return url.pathname.startsWith('/spring-projects/');
+        if (host === 'raw.githubusercontent.com') return url.pathname.startsWith('/spring-projects/spring-security/');
+        if (host === 'openjdk.org') return url.pathname.startsWith('/jeps/');
+        if (host === 'yaml.org') return url.pathname.startsWith('/spec/') || url.pathname.startsWith('/type/');
+        if (host === 'docs.oracle.com') return url.pathname.startsWith('/en/java/javase/');
+        if (host === 'enterprise.spring.io') return url.pathname === '/';
+        return true;
+    } catch {
+        return false;
+    }
+}
+
 async function fetchStatus(url) {
     try {
-        const response = await fetch(url, {
-            method: 'GET',
-            redirect: 'follow',
-            headers: { 'user-agent': 'Mozilla/5.0 (spring-tools explanations check)' },
-            signal: AbortSignal.timeout(30000),
-        });
-        await response.arrayBuffer().catch(() => undefined);
-        return response.status;
+        let target = url;
+        for (let redirects = 0; redirects <= 5; redirects++) {
+            const response = await fetch(target, {
+                method: 'GET',
+                redirect: 'manual',
+                headers: { 'user-agent': 'Mozilla/5.0 (spring-tools explanations check)' },
+                signal: AbortSignal.timeout(30000),
+            });
+            if (![301, 302, 303, 307, 308].includes(response.status)) {
+                await response.body?.cancel().catch(() => undefined);
+                return response.status;
+            }
+            const location = response.headers.get('location');
+            await response.body?.cancel().catch(() => undefined);
+            if (!location || redirects === 5) return response.status;
+            const next = new URL(location, target).href;
+            if (!allowedDocumentationUrl(next)) {
+                return `blocked redirect  ${next}`;
+            }
+            target = next;
+        }
+        return 'too many redirects';
     } catch (error) {
         return `ERR ${error.name ?? ''} ${error.message ?? ''}`.trim();
     }
@@ -166,7 +213,11 @@ async function fetchStatus(url) {
 
 export async function checkLinks(urls, concurrency = 4) {
     const failures = [];
-    const queue = [...urls];
+    const queue = [];
+    for (const url of urls) {
+        if (allowedDocumentationUrl(url)) queue.push(url);
+        else failures.push(`blocked URL (outside approved documentation hosts)  ${url}`);
+    }
     async function worker() {
         while (queue.length) {
             const url = queue.shift();
@@ -198,8 +249,12 @@ export function runChecks(options) {
         errors.push(`orphan playbook without a matching problem-type code: ${orphan}.md`);
     }
 
-    const selected = options.codes?.length ? options.codes : [...playbooks];
+    const selected = options.codes?.length ? [...new Set(options.codes)] : [...playbooks];
     for (const code of selected) {
+        if (!/^(?:[A-Z][A-Z0-9_]+|YamlSchemaProblem)$/.test(code)) {
+            errors.push(`invalid diagnostic code '${code}'`);
+            continue;
+        }
         const file = join(root, EXPLANATIONS_DIR, `${code}.md`);
         if (!existsSync(file)) {
             errors.push(`missing playbook: ${EXPLANATIONS_DIR}/${code}.md`);
@@ -219,7 +274,11 @@ export function runChecks(options) {
         if (!existsSync(todoFile)) {
             errors.push(`missing coverage table ${TODO_FILE}`);
         } else {
-            const table = parseTodoTable(readFileSync(todoFile, 'utf8'));
+            const todoText = readFileSync(todoFile, 'utf8');
+            const table = parseTodoTable(todoText);
+            for (const code of duplicateTodoRows(todoText)) {
+                errors.push(`${TODO_FILE}: duplicate row for code ${code}`);
+            }
             for (const code of knownCodes) {
                 if (!table.has(code)) {
                     errors.push(`${TODO_FILE}: no row for code ${code}`);

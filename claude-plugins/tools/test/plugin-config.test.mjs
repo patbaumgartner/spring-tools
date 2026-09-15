@@ -18,10 +18,16 @@ import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
 
 import {
+    COPILOT_DIR,
     HOOK_SERVER,
+    MCP_SCHEMA,
     PLUGIN_DIR,
+    PLUGIN_SCHEMA,
     SCOPED_TOOL_PREFIX,
     checkAgent,
+    checkAgentPluginManifest,
+    checkCopilotAgent,
+    checkCopilotHooks,
     checkEvals,
     checkHooks,
     checkManifest,
@@ -31,6 +37,7 @@ import {
     skillToolNames,
     uncoveredTools,
 } from '../lib/plugin-config.mjs';
+import { copilotAgentId, countToolMatches, toolGradePasses } from '../lib/eval-grading.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = join(here, '..', '..', '..');
@@ -90,7 +97,8 @@ test('the quickfix skill reads explanations by diagnostic code and may look up t
     const front = parseFrontMatter(text);
     // Named arguments expand to an empty string when omitted; $ARGUMENTS[2] would stay literal.
     assert.deepEqual(front.arguments, ['code', 'file', 'range']);
-    assert.ok(text.includes('${CLAUDE_PLUGIN_ROOT}/explanations/$code.md'));
+    assert.ok(text.includes('${CLAUDE_PLUGIN_ROOT}/explanations/<CODE>.md'));
+    assert.ok(text.includes('`../../explanations/<CODE>.md` relative to this skill directory'));
     assert.ok(!/\$ARGUMENTS\[/.test(text), 'quickfix should use the named placeholders only');
     assert.ok(front['allowed-tools'].includes(`${SCOPED_TOOL_PREFIX}getSpringBootVersion`));
 });
@@ -207,10 +215,105 @@ test('negative control: a tool nobody grants shows up as uncovered', () => {
     assert.deepEqual(uncoveredTools(new Map([['fileChanged', ['filePath']]]), [], hooks), [], 'hooks count as coverage');
 });
 
-test('check-plugin-config.mjs reports the inventory it validated', () => {
+test('check-plugin-config.mjs reports the inventory it validated', (t) => {
     const result = spawnSync(process.execPath, [join(here, '..', 'check-plugin-config.mjs')], { encoding: 'utf8' });
+    if (result.error?.code === 'EPERM') {
+        t.skip('sandbox denies child process creation');
+        return;
+    }
     assert.equal(result.status, 0, result.stderr);
-    assert.match(result.stdout, /^plugin config OK \(\d+ tools, \d+ skills, \d+ agent\(s\), \d+ eval case\(s\), every tool covered by a skill or hook\)/);
+    assert.match(result.stdout, /^plugin config OK \(\d+ tools, \d+ skills, \d+ agent\(s\) with a Copilot copy, \d+ eval case\(s\), every tool covered by a skill or hook\)/);
+});
+
+const agentPluginManifest = () => JSON.parse(readFileSync(join(pluginDir, 'plugin.json'), 'utf8'));
+const agentPluginMcp = () => JSON.parse(readFileSync(join(pluginDir, 'mcp.json'), 'utf8'));
+const claudeManifest = () => JSON.parse(readFileSync(join(pluginDir, '.claude-plugin', 'plugin.json'), 'utf8'));
+
+test('the Agent Plugins manifests Copilot reads stay within the closed schema and in sync with the Claude manifest', () => {
+    const manifest = agentPluginManifest();
+    const mcp = agentPluginMcp();
+    assert.deepEqual(checkAgentPluginManifest(manifest, mcp, claudeManifest(), repoRoot), []);
+    assert.equal(manifest.$schema, PLUGIN_SCHEMA);
+    assert.equal(mcp.$schema, MCP_SCHEMA);
+    // Copilot expands ${PLUGIN_ROOT} in args only, so the command has to be a bare executable.
+    assert.equal(mcp.mcpServers['spring-tools-mcp'].command, 'node');
+    assert.ok(mcp.mcpServers['spring-tools-mcp'].args.some((a) => a === '${PLUGIN_ROOT}/launcher.js'));
+});
+
+test('negative control: schema violations and drift between the two manifests are reported', () => {
+    const claude = claudeManifest();
+    const broken = { ...agentPluginManifest(), displayName: 'Spring Tools', version: '9.9.9', author: 'Spring Tools' };
+    const errors = checkAgentPluginManifest(broken, agentPluginMcp(), claude, repoRoot);
+    assert.ok(errors.some((e) => e.includes("'displayName' is not allowed")));
+    assert.ok(errors.some((e) => e.includes('version differs')));
+    assert.ok(errors.some((e) => e.includes('author must be an object')));
+    const badMcp = { $schema: MCP_SCHEMA, mcpServers: { 'spring-tools-mcp': { type: 'stdio', command: '${PLUGIN_ROOT}/node', args: ['launcher.js'], env: { PLUGIN_ROOT: '/x' } } } };
+    const mcpErrors = checkAgentPluginManifest(agentPluginManifest(), badMcp, claude, repoRoot);
+    assert.ok(mcpErrors.some((e) => e.includes("command must be 'node'")));
+    assert.ok(mcpErrors.some((e) => e.includes('${PLUGIN_ROOT}/launcher.js')));
+    assert.ok(mcpErrors.some((e) => e.includes("must not redefine 'PLUGIN_ROOT'")));
+});
+
+test('the Copilot hooks only use command hooks with both shells and existing scripts', () => {
+    const hooks = JSON.parse(readFileSync(join(pluginDir, COPILOT_DIR, 'hooks', 'hooks.json'), 'utf8'));
+    assert.deepEqual(checkCopilotHooks(hooks, repoRoot), []);
+    assert.ok(hooks.hooks.sessionStart[0].bash.includes('install.js'));
+});
+
+test('negative control: Claude hook spellings in the Copilot hooks file are rejected', () => {
+    const pascalCase = { version: 1, hooks: { SessionStart: [{ type: 'command', bash: 'node x.js', powershell: 'node x.js' }] } };
+    assert.ok(checkCopilotHooks(pascalCase, null).some((e) => e.includes("unknown event 'SessionStart'")));
+    const mcpTool = { version: 1, hooks: { postToolUse: [{ type: 'mcp_tool', tool: 'fileChanged' }] } };
+    assert.ok(checkCopilotHooks(mcpTool, null).some((e) => e.includes("only runs 'command' hooks")));
+    const missingShell = { version: 1, hooks: { sessionStart: [{ type: 'command', bash: 'node x.js' }] } };
+    assert.ok(checkCopilotHooks(missingShell, null).some((e) => e.includes('powershell')));
+    const missingScript = { version: 1, hooks: { sessionStart: [{ type: 'command', bash: 'node "$PLUGIN_ROOT/nope.js"', powershell: 'node "$env:PLUGIN_ROOT/nope.js"' }] } };
+    assert.ok(checkCopilotHooks(missingScript, repoRoot).some((e) => e.includes('nope.js')));
+});
+
+test('the Copilot agent copies keep the instructions of their Claude originals', () => {
+    const copilotAgentsDir = join(pluginDir, COPILOT_DIR, 'agents');
+    const copies = readdirSync(copilotAgentsDir).filter((f) => f.endsWith('.agent.md'));
+    assert.deepEqual(copies.sort(), agentFiles.map((f) => f.replace(/\.md$/, '.agent.md')).sort());
+    for (const file of copies) {
+        const claudeText = readFileSync(join(agentsDir, file.replace(/\.agent\.md$/, '.md')), 'utf8');
+        assert.deepEqual(checkCopilotAgent(file, readFileSync(join(copilotAgentsDir, file), 'utf8'), claudeText), []);
+        // Copilot supports `tools` as an allowlist, but not Claude-only `model` metadata.
+        assert.deepEqual(Object.keys(parseFrontMatter(readFileSync(join(copilotAgentsDir, file), 'utf8'))), ['name', 'description', 'tools']);
+    }
+});
+
+test('Claude, Copilot and OpenCode reviewer adapters are generated from the portable spring-review skill', () => {
+    const shared = skillText('spring-review').replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n/, '').trim();
+    const adapters = [
+        readFileSync(join(agentsDir, 'spring-reviewer.md'), 'utf8'),
+        readFileSync(join(pluginDir, COPILOT_DIR, 'agents', 'spring-reviewer.agent.md'), 'utf8'),
+        readFileSync(join(pluginDir, 'opencode', 'agents', 'spring-reviewer.md'), 'utf8'),
+    ];
+    for (const text of adapters) {
+        assert.equal(text.replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n/, '').trim(), shared);
+    }
+    const openCode = JSON.parse(readFileSync(join(pluginDir, 'opencode', 'opencode.jsonc'), 'utf8'));
+    assert.deepEqual(openCode.mcp['spring-tools'].command, ['node', '{env:SPRING_TOOLS_PLUGIN_ROOT}/launcher.js']);
+    assert.equal(openCode.mcp['spring-tools'].timeout, 120000);
+    assert.match(adapters[2], /mode: subagent[\s\S]*edit: deny[\s\S]*spring-tools_\*.*allow/);
+});
+
+test('snapshot workflow updates the portable and Claude plugin manifest versions together', () => {
+    const workflow = readFileSync(join(repoRoot, '.github', 'workflows', 'snapshot-standalone-ls.yml'), 'utf8');
+    assert.match(workflow, /jq --arg v "\$version" '\.version = \$v' claude-plugins\/spring-tools\/\.claude-plugin\/plugin\.json/);
+    assert.match(workflow, /jq --arg v "\$version" '\.version = \$v' claude-plugins\/spring-tools\/plugin\.json/);
+    assert.match(workflow, /git add claude-plugins\/spring-tools\/\.claude-plugin\/plugin\.json claude-plugins\/spring-tools\/plugin\.json/);
+});
+
+test('negative control: a drifted or over-specified Copilot agent copy is reported', () => {
+    const claudeText = readFileSync(join(agentsDir, 'spring-reviewer.md'), 'utf8');
+    const drifted = '---\nname: spring-reviewer\ndescription: Something else entirely that is long enough.\nmodel: inherit\n---\n\nDo something different.\n';
+    const errors = checkCopilotAgent('spring-reviewer.agent.md', drifted, claudeText);
+    assert.ok(errors.some((e) => e.includes("'model' is not supported by Copilot custom agents")));
+    assert.ok(errors.some((e) => e.includes('description differs')));
+    assert.ok(errors.some((e) => e.includes('instructions differ')));
+    assert.ok(checkCopilotAgent('ghost.agent.md', '---\nname: ghost\ndescription: x\n---\n\nbody\n', undefined).some((e) => e.includes('no matching agents/ghost.md')));
 });
 
 test('the eval suite mocks every MCP tool with the recorded tools/list and covers every skill and agent with a case', () => {
@@ -260,4 +363,39 @@ test('negative control: a broken eval suite is rejected', () => {
     } finally {
         rmSync(dir, { recursive: true, force: true });
     }
+});
+
+test('the mock MCP server rejects tool names that could traverse out of its mock directory', (t) => {
+    const server = join(here, '..', 'evals', 'mock-mcp-server.mjs');
+    const result = spawnSync(process.execPath, [server], {
+        encoding: 'utf8',
+        input: `${JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: '../../etc/passwd', arguments: {} } })}\n`,
+        env: { ...process.env, EVAL_MOCK_DIRS: join(here, 'fixtures') },
+    });
+    if (result.error?.code === 'EPERM') {
+        t.skip('sandbox denies child process creation');
+        return;
+    }
+    assert.equal(result.status, 0, result.stderr);
+    const reply = JSON.parse(result.stdout.trim());
+    assert.equal(reply.result.isError, true);
+    assert.equal(reply.result.content[0].text, 'invalid tool name');
+});
+
+test('Copilot eval tool graders honor positive and negative occurrence bounds', () => {
+    const trace = [
+        { tool: 'spring-tools-mcp-getProjectList', input: '{}' },
+        { tool: 'skill', input: '{"skill":"spring-tools:validate"}' },
+    ];
+    assert.equal(countToolMatches({ tool: 'mcp__plugin_spring-tools_spring-tools-mcp__getProjectList' }, trace), 1);
+    assert.equal(toolGradePasses({ type: 'tool_used', tool: 'mcp__plugin_spring-tools_spring-tools-mcp__getProjectList' }, trace), true);
+    assert.equal(toolGradePasses({ type: 'tool_used', tool: 'Skill', min: 0, max: 0 }, trace), false);
+    assert.equal(toolGradePasses({ type: 'tool_used', tool: 'Skill', input_match: 'nope', min: 0, max: 0 }, trace), true);
+    assert.equal(toolGradePasses({ type: 'tool_used', tool: 'Skill', min: 2, max: 3 }, trace), false);
+});
+
+test('Copilot evals select custom agents using the file-derived ID without plugin namespacing', () => {
+    assert.equal(copilotAgentId('spring-reviewer'), 'spring-reviewer');
+    assert.equal(copilotAgentId('spring-tools:spring-reviewer'), undefined);
+    assert.equal(copilotAgentId('spring-reviewer --evil'), undefined);
 });

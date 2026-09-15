@@ -22,6 +22,10 @@ const https = require('https');
 const net = require('net');
 const tls = require('tls');
 const crypto = require('crypto');
+const os = require('os');
+const { spawnSync } = require('child_process');
+const { Transform } = require('stream');
+const { pipeline } = require('stream/promises');
 
 const JAR_NAME = 'spring-boot-language-server-standalone-exec.jar';
 const DEFAULT_DOWNLOAD_BASE = 'https://cdn.spring.io/spring-tools';
@@ -32,12 +36,26 @@ const LOCK_WAIT_MAX_MS = 20 * 60 * 1000;
 const LOCK_POLL_MS = 500;
 const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '::1', '[::1]']);
 
+// The Agent Plugins manifest at the plugin root is the one both clients can read; the Claude Code
+// manifest in .claude-plugin/ is the fallback for older layouts.
 function pluginVersion(pluginRoot) {
-    const manifest = JSON.parse(fs.readFileSync(path.join(pluginRoot, '.claude-plugin', 'plugin.json'), 'utf8'));
-    if (typeof manifest.version !== 'string' || !manifest.version) {
-        throw new Error('plugin.json has no version');
+    const manifestPath = [path.join(pluginRoot, 'plugin.json'), path.join(pluginRoot, '.claude-plugin', 'plugin.json')]
+        .find((candidate) => fs.existsSync(candidate));
+    if (!manifestPath) {
+        throw new Error(`no plugin.json found in ${pluginRoot}`);
+    }
+    const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+    if (typeof manifest.version !== 'string' || !/^[0-9A-Za-z][0-9A-Za-z.+-]*$/.test(manifest.version)) {
+        throw new Error('plugin.json has no valid version');
     }
     return manifest.version;
+}
+
+function defaultInstallDir(pluginRoot = __dirname, env = process.env, home = os.homedir()) {
+    const dataDir = env.SPRING_TOOLS_DATA_DIR || env.CLAUDE_PLUGIN_DATA || env.PLUGIN_DATA || path.join(home, '.spring-tools', 'data');
+    // Keep artifacts from different plugin releases isolated; an old JAR must never satisfy
+    // --if-missing after the plugin version changes.
+    return path.resolve(dataDir, 'language-server', pluginVersion(pluginRoot));
 }
 
 /** Release versions live under release/<version>/, anything with a qualifier under snapshot/. */
@@ -219,21 +237,18 @@ async function downloadFile(url, dest, log) {
     const hash = crypto.createHash('sha256');
     let received = 0;
     let nextReport = 0;
-    const out = fs.createWriteStream(dest, { flags: 'wx' });
-    await new Promise((resolve, reject) => {
-        response.on('data', (chunk) => {
+    const meter = new Transform({
+        transform(chunk, encoding, callback) {
             hash.update(chunk);
             received += chunk.length;
             if (total && received >= nextReport) {
                 log(`  ${Math.floor((received / total) * 100)}% (${Math.round(received / 1048576)} of ${Math.round(total / 1048576)} MB)`);
                 nextReport += Math.max(total / 10, 1);
             }
-        });
-        response.once('error', reject);
-        out.once('error', reject);
-        out.once('finish', resolve);
-        response.pipe(out);
+            callback(null, chunk);
+        },
     });
+    await pipeline(response, meter, fs.createWriteStream(dest, { flags: 'wx' }));
     if (total && received !== total) {
         throw new Error(`Download of ${url} ended after ${received} of ${total} bytes`);
     }
@@ -277,11 +292,44 @@ function removeStalePartials(dir) {
     }
 }
 
+function findSourceRoot(pluginRoot, env = process.env) {
+    const candidates = [env.SPRING_TOOLS_SOURCE_DIR, path.resolve(pluginRoot, '..', '..')].filter(Boolean);
+    return candidates.map((candidate) => path.resolve(candidate)).find((root) =>
+        fs.existsSync(path.join(root, 'headless-services', 'pom.xml'))
+        && (fs.existsSync(path.join(root, 'mvnw')) || fs.existsSync(path.join(root, 'mvnw.cmd'))));
+}
+
+function buildJar(pluginRoot, dest, log) {
+    const sourceRoot = findSourceRoot(pluginRoot);
+    if (!sourceRoot) {
+        throw new Error('No Spring Tools source checkout found for a local build. Set SPRING_TOOLS_SOURCE_DIR to the repository root, or install the JAR manually and set SPRING_TOOLS_LS_JAR.');
+    }
+    const wrapper = path.join(sourceRoot, process.platform === 'win32' ? 'mvnw.cmd' : 'mvnw');
+    const args = ['-f', 'headless-services/pom.xml', '-pl', 'spring-boot-language-server-standalone', '-am', '-DskipTests', 'package'];
+    log(`Building Spring Boot Language Server from ${sourceRoot}`);
+    // Maven must not read MCP requests or write build output to the MCP stdout transport.
+    const result = spawnSync(wrapper, args, { cwd: sourceRoot, stdio: ['ignore', 2, 2], shell: process.platform === 'win32' });
+    if (result.error || result.status !== 0) {
+        throw new Error(`Local language server build failed${result.error ? `: ${result.error.message}` : ` (exit code ${result.status})`}`);
+    }
+    const targetDir = path.join(sourceRoot, 'headless-services', 'spring-boot-language-server-standalone', 'target');
+    const builtJar = fs.readdirSync(targetDir).filter((name) => name.endsWith('-standalone-exec.jar')).sort().at(-1);
+    if (!builtJar) throw new Error(`Maven build completed but no standalone JAR was found in ${targetDir}`);
+    const temporary = path.join(dest, `${JAR_NAME}.${process.pid}.part`);
+    try {
+        fs.copyFileSync(path.join(targetDir, builtJar), temporary, fs.constants.COPYFILE_EXCL);
+        fs.renameSync(temporary, path.join(dest, JAR_NAME));
+    } finally {
+        try { fs.unlinkSync(temporary); } catch { /* already renamed or absent */ }
+    }
+    log(`Built Spring Boot Language Server and installed it to ${path.join(dest, JAR_NAME)}`);
+}
+
 /**
  * Makes sure <dest>/<JAR_NAME> exists for the given plugin version.
  * @returns {Promise<{status: 'present'|'downloaded', jarPath: string}>}
  */
-async function ensureJar({ pluginRoot = __dirname, dest = path.join(pluginRoot, 'language-server'), ifMissing = false, log = (line) => console.error(line) } = {}) {
+async function ensureJar({ pluginRoot = __dirname, dest = defaultInstallDir(pluginRoot), ifMissing = false, log = (line) => console.error(line) } = {}) {
     const jarPath = path.join(dest, JAR_NAME);
     if (ifMissing && fs.existsSync(jarPath)) {
         return { status: 'present', jarPath };
@@ -294,24 +342,32 @@ async function ensureJar({ pluginRoot = __dirname, dest = path.join(pluginRoot, 
             return { status: 'present', jarPath };
         }
         removeStalePartials(dest);
-        const { jarUrl, sha256Url } = downloadUrls(version);
-        log(`Downloading Spring Boot Language Server ${version} from ${jarUrl}`);
-        const expected = (await fetchText(sha256Url)).split(/\s+/)[0].toLowerCase();
-        if (!/^[0-9a-f]{64}$/.test(expected)) {
-            throw new Error(`Checksum file ${sha256Url} does not contain a SHA-256 digest`);
-        }
-        const partPath = `${jarPath}.${process.pid}.part`;
         try {
-            const actual = await downloadFile(jarUrl, partPath, log);
-            if (actual !== expected) {
-                throw new Error(`Checksum mismatch for ${JAR_NAME}: expected ${expected}, got ${actual}`);
+            const { jarUrl, sha256Url } = downloadUrls(version);
+            log(`Downloading Spring Boot Language Server ${version} from ${jarUrl}`);
+            const expected = (await fetchText(sha256Url)).split(/\s+/)[0].toLowerCase();
+            if (!/^[0-9a-f]{64}$/.test(expected)) {
+                throw new Error(`Checksum file ${sha256Url} does not contain a SHA-256 digest`);
             }
-            fs.renameSync(partPath, jarPath);
-        } finally {
-            try { fs.unlinkSync(partPath); } catch { /* renamed away or never created */ }
+            const partPath = `${jarPath}.${process.pid}.part`;
+            try {
+                const actual = await downloadFile(jarUrl, partPath, log);
+                if (actual !== expected) throw new Error(`Checksum mismatch for ${JAR_NAME}: expected ${expected}, got ${actual}`);
+                fs.renameSync(partPath, jarPath);
+            } finally {
+                try { fs.unlinkSync(partPath); } catch { /* renamed away or never created */ }
+            }
+            log(`Installed Spring Boot Language Server ${version} to ${jarPath}`);
+            return { status: 'downloaded', jarPath };
+        } catch (downloadError) {
+            log(`Language server download failed: ${downloadError.message}`);
+            try {
+                buildJar(pluginRoot, dest, log);
+                return { status: 'built', jarPath };
+            } catch (buildError) {
+                throw new Error(`Could not download or build the Spring Tools language server. Download error: ${downloadError.message}. Build error: ${buildError.message}`);
+            }
         }
-        log(`Installed Spring Boot Language Server ${version} to ${jarPath}`);
-        return { status: 'downloaded', jarPath };
     } finally {
         release();
     }
@@ -322,7 +378,12 @@ function parseArgs(argv) {
     for (let i = 0; i < argv.length; i++) {
         const arg = argv[i];
         if (arg === '--if-missing') options.ifMissing = true;
-        else if (arg === '--dest') options.dest = path.resolve(argv[++i] ?? '');
+        else if (arg === '--dest') {
+            if (!argv[i + 1] || argv[i + 1].startsWith('--')) {
+                throw new Error('--dest requires a directory path');
+            }
+            options.dest = path.resolve(argv[++i]);
+        }
         else if (arg === '--help' || arg === '-h') options.help = true;
         else throw new Error(`unknown argument: ${arg}`);
     }
@@ -342,7 +403,7 @@ async function main() {
     const result = await ensureJar({ ifMissing: options.ifMissing, dest: options.dest });
     if (result.status === 'downloaded') {
         // stdout of a SessionStart hook is added to Claude's context.
-        console.log(`Spring Tools downloaded its language server to ${result.jarPath}. If the spring-tools-mcp MCP server is listed as failed in /mcp, reconnect it there or restart Claude Code.`);
+        console.log(`Spring Tools downloaded its language server to ${result.jarPath}. If the Spring Tools MCP server is listed as failed, reconnect it or restart the agent client.`);
     }
     return 0;
 }
@@ -354,4 +415,4 @@ if (require.main === module) {
     });
 }
 
-module.exports = { JAR_NAME, DEFAULT_DOWNLOAD_BASE, downloadUrls, assertAllowedUrl, proxyFor, hostMatchesNoProxy, ensureJar, pluginVersion };
+module.exports = { JAR_NAME, DEFAULT_DOWNLOAD_BASE, downloadUrls, assertAllowedUrl, proxyFor, hostMatchesNoProxy, ensureJar, pluginVersion, defaultInstallDir, parseArgs, findSourceRoot };

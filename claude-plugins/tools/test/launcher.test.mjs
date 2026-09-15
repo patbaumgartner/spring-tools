@@ -14,7 +14,7 @@
 
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, existsSync, rmSync } from 'node:fs';
+import { mkdtempSync, existsSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -25,7 +25,8 @@ const require = createRequire(import.meta.url);
 const here = dirname(fileURLToPath(import.meta.url));
 const pluginRoot = join(here, '..', '..', 'spring-tools');
 const launcher = require(join(pluginRoot, 'launcher.js'));
-const { MIN_JAVA_MAJOR, SERVER_INSTRUCTIONS, parseJavaMajor, javaCandidates, pickJava, splitOpts, watchEnabled, buildJavaArgs } = launcher;
+const { defaultInstallDir, pluginVersion } = require(join(pluginRoot, 'install.js'));
+const { MIN_JAVA_MAJOR, SERVER_INSTRUCTIONS, serverInstructions, parseJavaMajor, javaCandidates, pickJava, splitOpts, watchEnabled, buildJavaArgs, resolveProjectDir, resolveDataDir } = launcher;
 
 test('parses the major version from java -version output of old and new JDKs', () => {
     assert.equal(parseJavaMajor('openjdk version "21.0.2" 2024-01-16\nOpenJDK Runtime Environment'), 21);
@@ -34,6 +35,19 @@ test('parses the major version from java -version output of old and new JDKs', (
     assert.equal(parseJavaMajor('openjdk version "17.0.10" 2024-01-16 LTS'), 17);
     assert.equal(parseJavaMajor(''), null);
     assert.equal(parseJavaMajor('bash: java: command not found'), null);
+});
+
+test('persistent data directory prefers explicit and host-provided locations then falls back to the user home', () => {
+    assert.equal(resolveDataDir({ env: { SPRING_TOOLS_DATA_DIR: '/custom/data', CLAUDE_PLUGIN_DATA: '/claude' }, home: '/home/test' }), '/custom/data');
+    assert.equal(resolveDataDir({ env: { CLAUDE_PLUGIN_DATA: '/claude', PLUGIN_DATA: '/plugin' }, home: '/home/test' }), '/claude');
+    assert.equal(resolveDataDir({ env: { PLUGIN_DATA: '/plugin' }, home: '/home/test' }), '/plugin');
+    assert.equal(resolveDataDir({ env: { SPRING_TOOLS_DATA_DIR: 'relative/data' }, home: '/home/test' }), join(process.cwd(), 'relative/data'));
+    assert.equal(resolveDataDir({ env: {}, home: '/home/test' }), '/home/test/.spring-tools/data');
+});
+
+test('language server JAR is resolved under persistent data rather than the plugin installation', () => {
+    const dataDir = resolveDataDir({ env: { PLUGIN_DATA: '/client/data' }, home: '/home/test' });
+    assert.equal(defaultInstallDir(pluginRoot, { PLUGIN_DATA: '/client/data' }, '/home/test'), join(dataDir, 'language-server', pluginVersion(pluginRoot)));
 });
 
 test('candidates are tried most specific first: SPRING_TOOLS_JAVA, JAVA_HOME, then PATH', () => {
@@ -79,7 +93,7 @@ test('JVM arguments put user options after the defaults so they win, and end wit
     assert.ok(args.includes('-Dlanguageserver.enabled=false'));
     assert.ok(args.includes('-Dspring.boot.ls.project.dir=/proj'));
     assert.ok(args.includes(`-Dlogging.file.name=${join('/data', 'boot-ls.log')}`));
-    assert.ok(args.includes(`-Dspring.ai.mcp.server.instructions=${SERVER_INSTRUCTIONS}`));
+    assert.ok(args.includes(`-Dspring.ai.mcp.server.instructions=${serverInstructions()}`));
 });
 
 test('the file watcher is on by default and SPRING_TOOLS_LS_WATCH=false turns it off', () => {
@@ -97,20 +111,66 @@ test('the file watcher is on by default and SPRING_TOOLS_LS_WATCH=false turns it
     assert.ok(args.indexOf('-Dspring.boot.ls.project.watch=true') < args.lastIndexOf('-Dspring.boot.ls.project.watch=false'));
 });
 
-test('server instructions name the entry-point tools and stay under the 2 KB Claude Code truncation limit', () => {
+test('server instructions name entry-point tools, use host-neutral skill guidance, and stay under 2 KB', () => {
     for (const tool of ['getProjectList', 'getProjectDiagnostics', 'fileChanged', 'refreshWorkspace', 'getBeanDetails', 'getRequestMappings']) {
         assert.ok(SERVER_INSTRUCTIONS.includes(tool), `${tool} should be mentioned`);
     }
-    // Each skill the instructions point to must exist, so the hint never dangles after a rename.
-    for (const skill of SERVER_INSTRUCTIONS.matchAll(/\/spring-tools:([\w-]+)/g)) {
-        assert.ok(existsSync(join(pluginRoot, 'skills', skill[1], 'SKILL.md')), `skill ${skill[1]} referenced by the instructions is missing`);
+    // Each host-neutral skill name must map to an installed skill in this package.
+    for (const skill of ['quickfix', 'validate', 'architecture', 'beans', 'endpoints', 'project-info', 'spring-versions']) {
+        assert.ok(existsSync(join(pluginRoot, 'skills', skill, 'SKILL.md')), `skill ${skill} referenced by the instructions is missing`);
     }
-    assert.ok(SERVER_INSTRUCTIONS.includes('watches'), 'Claude should know it need not notify the server about every edit');
+    assert.ok(SERVER_INSTRUCTIONS.includes('watches'), 'clients should know they need not notify the server about every edit');
+    assert.ok(!SERVER_INSTRUCTIONS.includes('/spring-tools:'), 'host-specific slash invocations do not work on every client');
+    assert.ok(SERVER_INSTRUCTIONS.includes('explanations/<CODE>.md'));
     assert.ok(Buffer.byteLength(SERVER_INSTRUCTIONS, 'utf8') < 2048);
     assert.ok(!/["\n]/.test(SERVER_INSTRUCTIONS), 'quotes and newlines would complicate argv quoting on Windows');
 });
 
-test('the launcher fails fast with an actionable message when no Java 21+ runtime is available', () => {
+test('the instructions carry the absolute playbook directory for clients that do not expand path placeholders', () => {
+    const instructions = serverInstructions('/plugins/spring-tools');
+    assert.ok(instructions.startsWith(SERVER_INSTRUCTIONS));
+    assert.ok(instructions.includes(join('/plugins/spring-tools', 'explanations')));
+    assert.ok(instructions.includes('<CODE>.md'));
+    assert.ok(Buffer.byteLength(serverInstructions(pluginRoot), 'utf8') < 2048);
+    assert.ok(!/["\n]/.test(instructions));
+    // The directory must really exist, otherwise every client is pointed at a dangling path.
+    assert.ok(existsSync(join(pluginRoot, 'explanations')));
+});
+
+test('the project directory falls back from the explicit override down to the Copilot session state', () => {
+    const root = mkdtempSync(join(tmpdir(), 'spring-tools-projectdir-'));
+    try {
+        const plugin = join(root, 'plugin');
+        const workspace = join(root, 'workspace');
+        const other = join(root, 'other');
+        const home = join(root, 'home');
+        const session = join(home, '.copilot', 'session-state', 'sess-1');
+        for (const dir of [plugin, workspace, other, session]) {
+            mkdirSync(dir, { recursive: true });
+        }
+        writeFileSync(join(session, 'workspace.yaml'), `version: 1\ncwd: ${workspace}\nmodel: gpt\n`);
+        const resolve = (env, cwd) => resolveProjectDir({ env, cwd, pluginRoot: plugin, home });
+
+        // An explicit override always wins, even over a perfectly good working directory.
+        assert.deepEqual(resolve({ SPRING_TOOLS_PROJECT_DIR: other, CLAUDE_PROJECT_DIR: workspace }, workspace), { dir: other, source: 'SPRING_TOOLS_PROJECT_DIR', detected: true });
+        // Claude Code exports the project directory; Copilot does not but starts the server in the plugin.
+        assert.deepEqual(resolve({ CLAUDE_PROJECT_DIR: workspace }, plugin), { dir: workspace, source: 'CLAUDE_PROJECT_DIR', detected: true });
+        assert.deepEqual(resolve({}, workspace), { dir: workspace, source: 'working directory', detected: true });
+        assert.deepEqual(resolve({ COPILOT_AGENT_SESSION_ID: 'sess-1' }, plugin), { dir: workspace, source: 'Copilot session state', detected: true });
+        assert.deepEqual(resolve({ PWD: workspace }, plugin), { dir: workspace, source: 'PWD', detected: true });
+
+        assert.throws(() => resolve({ SPRING_TOOLS_PROJECT_DIR: join(root, 'gone'), PWD: workspace }, plugin), /SPRING_TOOLS_PROJECT_DIR is not an existing directory/);
+
+        // Nothing usable: never index the plugin itself, and say that the detection failed.
+        assert.deepEqual(resolve({ CLAUDE_PROJECT_DIR: join(root, 'gone'), PWD: plugin, COPILOT_AGENT_SESSION_ID: 'nope' }, plugin), { dir: plugin, source: 'working directory', detected: false });
+        // A session id must not be able to escape the session-state directory.
+        assert.equal(resolve({ COPILOT_AGENT_SESSION_ID: '../../..' }, plugin).detected, false);
+    } finally {
+        rmSync(root, { recursive: true, force: true });
+    }
+});
+
+test('the launcher fails fast with an actionable message when no Java 21+ runtime is available', (t) => {
     const emptyBin = mkdtempSync(join(tmpdir(), 'spring-tools-nojava-'));
     try {
         const result = spawnSync(process.execPath, [join(pluginRoot, 'launcher.js')], {
@@ -118,6 +178,10 @@ test('the launcher fails fast with an actionable message when no Java 21+ runtim
             timeout: 30000,
             env: { PATH: emptyBin, HOME: emptyBin, CLAUDE_PROJECT_DIR: emptyBin, CLAUDE_PLUGIN_DATA: emptyBin },
         });
+        if (result.error?.code === 'EPERM') {
+            t.skip('sandbox denies child process creation');
+            return;
+        }
         assert.equal(result.status, 1);
         assert.match(result.stderr, /No Java 21\+ runtime found/);
         assert.match(result.stderr, /JAVA_HOME or SPRING_TOOLS_JAVA/);
@@ -125,4 +189,19 @@ test('the launcher fails fast with an actionable message when no Java 21+ runtim
     } finally {
         rmSync(emptyBin, { recursive: true, force: true });
     }
+});
+
+
+test('a cached plugin without a workspace exits before downloading and keeps MCP stdout clean', () => {
+    const result = spawnSync(process.execPath, [join(pluginRoot, 'launcher.js')], {
+        cwd: pluginRoot,
+        encoding: 'utf8',
+        timeout: 10000,
+        env: { PATH: process.env.PATH, PWD: pluginRoot },
+    });
+    assert.equal(result.status, 1, result.stderr);
+    assert.match(result.stderr, /refusing to index the plugin directory/);
+    assert.match(result.stderr, /SPRING_TOOLS_PROJECT_DIR/);
+    assert.equal(result.stdout, '');
+    assert.doesNotMatch(result.stderr, /Downloading/);
 });

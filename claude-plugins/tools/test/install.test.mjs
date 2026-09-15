@@ -12,9 +12,9 @@
 // Exercises the plugin's JAR installer against a local HTTP server standing in for the CDN.
 
 import assert from 'node:assert/strict';
-import { execFile } from 'node:child_process';
+import { execFile, spawnSync } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
@@ -26,7 +26,7 @@ const require = createRequire(import.meta.url);
 const here = dirname(fileURLToPath(import.meta.url));
 const pluginRoot = join(here, '..', '..', 'spring-tools');
 const installer = require(join(pluginRoot, 'install.js'));
-const { JAR_NAME, ensureJar, downloadUrls, assertAllowedUrl, proxyFor, hostMatchesNoProxy, pluginVersion } = installer;
+const { JAR_NAME, ensureJar, downloadUrls, assertAllowedUrl, proxyFor, hostMatchesNoProxy, pluginVersion, defaultInstallDir, parseArgs } = installer;
 
 const version = pluginVersion(pluginRoot);
 const jarBytes = randomBytes(3 * 1024 * 1024 + 123);
@@ -34,12 +34,37 @@ const jarDigest = createHash('sha256').update(jarBytes).digest('hex');
 const state = { mode: 'ok', requests: [] };
 let server;
 let base;
+let loopbackUnavailable = false;
 const quiet = () => {};
+
+test('installer defaults to persistent client data and rejects a missing --dest value', () => {
+    assert.equal(defaultInstallDir(pluginRoot, { PLUGIN_DATA: '/client/data' }, '/home/test'), join('/client/data', 'language-server', version));
+    assert.equal(defaultInstallDir(pluginRoot, {}, '/home/test'), join('/home/test/.spring-tools/data', 'language-server', version));
+    assert.throws(() => parseArgs(['--dest']), /requires a directory path/);
+    assert.throws(() => parseArgs(['--dest', '--if-missing']), /requires a directory path/);
+    assert.equal(parseArgs(['--dest', 'cache']).dest, join(process.cwd(), 'cache'));
+});
+
+test('plugin versions used in download paths cannot escape the plugin data directory', () => {
+    const root = mkdtempSync(join(tmpdir(), 'spring-tools-version-'));
+    try {
+        mkdirSync(join(root, '.claude-plugin'));
+        writeFileSync(join(root, '.claude-plugin', 'plugin.json'), JSON.stringify({ version: '../../outside' }));
+        assert.throws(() => pluginVersion(root), /valid version/);
+    } finally {
+        rmSync(root, { recursive: true, force: true });
+    }
+});
 
 before(async () => {
     server = createServer((req, res) => {
         state.requests.push(req.url);
         let { pathname } = new URL(req.url, 'http://127.0.0.1');
+        if (state.mode === 'missing') {
+            res.writeHead(404);
+            res.end('not found');
+            return;
+        }
         const jarPath = `/spring-tools/release/language-server/spring-boot/${version}/${JAR_NAME}`;
         if (state.mode === 'redirect' && pathname.startsWith(jarPath)) {
             res.writeHead(302, { location: pathname.replace(jarPath, `/spring-tools/moved/${JAR_NAME}`) });
@@ -59,13 +84,20 @@ before(async () => {
             res.end('not found');
         }
     });
-    await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+    await new Promise((resolve, reject) => {
+        server.once('error', reject);
+        server.listen(0, '127.0.0.1', resolve);
+    }).catch((error) => {
+        if (error.code !== 'EPERM') throw error;
+        loopbackUnavailable = true;
+    });
+    if (loopbackUnavailable) return;
     base = `http://127.0.0.1:${server.address().port}/spring-tools`;
     process.env.SPRING_TOOLS_LS_DOWNLOAD_BASE = base;
 });
 
 after(() => {
-    server.close();
+    if (server?.listening) server.close();
     delete process.env.SPRING_TOOLS_LS_DOWNLOAD_BASE;
 });
 
@@ -77,8 +109,14 @@ beforeEach(() => {
 });
 
 const leftovers = () => readdirSync(dest).filter((n) => n !== JAR_NAME);
+const skipWithoutLoopback = (t) => {
+    if (!loopbackUnavailable) return false;
+    t.skip('sandbox denies loopback server binding');
+    return true;
+};
 
-test('downloads the JAR for the plugin version, verifies it and installs it atomically', async () => {
+test('downloads the JAR for the plugin version, verifies it and installs it atomically', async (t) => {
+    if (skipWithoutLoopback(t)) return;
     const result = await ensureJar({ pluginRoot, dest, log: quiet });
     assert.equal(result.status, 'downloaded');
     assert.equal(result.jarPath, join(dest, JAR_NAME));
@@ -95,27 +133,31 @@ test('--if-missing is a no-op when the JAR is already there', async () => {
     assert.deepEqual(state.requests, [], 'must not contact the server');
 });
 
-test('negative control: a checksum mismatch leaves no JAR and no partial file behind', async () => {
+test('negative control: a checksum mismatch leaves no JAR and no partial file behind', async (t) => {
+    if (skipWithoutLoopback(t)) return;
     state.mode = 'bad-sum';
     await assert.rejects(ensureJar({ pluginRoot, dest, log: quiet }), /Checksum mismatch/);
     assert.ok(!existsSync(join(dest, JAR_NAME)), 'a JAR that failed verification must not be installed');
     assert.deepEqual(leftovers(), []);
 });
 
-test('accepts the sha256sum "digest  filename" checksum format', async () => {
+test('accepts the sha256sum "digest  filename" checksum format', async (t) => {
+    if (skipWithoutLoopback(t)) return;
     state.mode = 'sha256sum-format';
     await ensureJar({ pluginRoot, dest, log: quiet });
     assert.ok(readFileSync(join(dest, JAR_NAME)).equals(jarBytes));
 });
 
-test('follows redirects that stay on an allowed host', async () => {
+test('follows redirects that stay on an allowed host', async (t) => {
+    if (skipWithoutLoopback(t)) return;
     state.mode = 'redirect';
     await ensureJar({ pluginRoot, dest, log: quiet });
     assert.ok(readFileSync(join(dest, JAR_NAME)).equals(jarBytes));
     assert.ok(state.requests.some((u) => u.includes('/moved/')), 'the moved locations must have been fetched');
 });
 
-test('concurrent installers serialize on the lock and the second one reuses the first download', async () => {
+test('concurrent installers serialize on the lock and the second one reuses the first download', async (t) => {
+    if (skipWithoutLoopback(t)) return;
     const [a, b] = await Promise.all([
         ensureJar({ pluginRoot, dest, ifMissing: true, log: quiet }),
         ensureJar({ pluginRoot, dest, ifMissing: true, log: quiet }),
@@ -125,13 +167,53 @@ test('concurrent installers serialize on the lock and the second one reuses the 
     assert.deepEqual(leftovers(), []);
 });
 
-test('stale partial downloads from an interrupted run are removed', async () => {
+test('stale partial downloads from an interrupted run are removed', async (t) => {
+    if (skipWithoutLoopback(t)) return;
     writeFileSync(join(dest, `${JAR_NAME}.4242.part`), 'truncated');
     await ensureJar({ pluginRoot, dest, log: quiet });
     assert.deepEqual(leftovers(), []);
 });
 
-test('the CLI reports a download on stdout for the SessionStart hook and stays silent when nothing was needed', async () => {
+test('falls back to building the standalone JAR from an available source checkout', async (t) => {
+    if (skipWithoutLoopback(t)) return;
+    state.mode = 'missing';
+    const root = mkdtempSync(join(tmpdir(), 'spring-tools-source-'));
+    const localPlugin = join(root, 'claude-plugins', 'spring-tools');
+    const target = join(root, 'headless-services', 'spring-boot-language-server-standalone', 'target');
+    mkdirSync(localPlugin, { recursive: true });
+    mkdirSync(target, { recursive: true });
+    writeFileSync(join(localPlugin, 'plugin.json'), JSON.stringify({ version }));
+    writeFileSync(join(root, 'headless-services', 'pom.xml'), '<project/>');
+    writeFileSync(join(root, 'mvnw'), `#!/bin/sh\nprintf "Maven build output\\n"\nmkdir -p headless-services/spring-boot-language-server-standalone/target\nprintf built > headless-services/spring-boot-language-server-standalone/target/test-standalone-exec.jar\n`);
+    chmodSync(join(root, 'mvnw'), 0o755);
+    try {
+        const script = `require(${JSON.stringify(join(pluginRoot, 'install.js'))}).ensureJar({
+            pluginRoot: ${JSON.stringify(localPlugin)}, dest: ${JSON.stringify(dest)}
+        }).then(result => process.stdout.write(JSON.stringify(result))).catch(error => {
+            console.error(error); process.exitCode = 1;
+        });`;
+        const output = await new Promise((resolve, reject) => {
+            execFile(process.execPath, ['-e', script], {
+                env: { ...process.env, SPRING_TOOLS_LS_DOWNLOAD_BASE: base, SPRING_TOOLS_SOURCE_DIR: root },
+            }, (error, stdout, stderr) => error ? reject(error) : resolve({ stdout, stderr }));
+        });
+        const result = JSON.parse(output.stdout);
+        assert.equal(result.status, 'built');
+        assert.match(output.stderr, /Maven build output/);
+        assert.equal(readFileSync(result.jarPath, 'utf8'), 'built');
+        assert.deepEqual(leftovers(), []);
+    } finally {
+        rmSync(root, { recursive: true, force: true });
+    }
+});
+
+test('the CLI reports a download on stdout for the SessionStart hook and stays silent when nothing was needed', async (t) => {
+    if (skipWithoutLoopback(t)) return;
+    const probe = spawnSync(process.execPath, ['-e', ''], { encoding: 'utf8' });
+    if (probe.error?.code === 'EPERM') {
+        t.skip('sandbox denies child process creation');
+        return;
+    }
     const env = { ...process.env, SPRING_TOOLS_LS_DOWNLOAD_BASE: base };
     delete env.SPRING_TOOLS_LS_JAR;
     // Must stay asynchronous: the mock server lives in this process and has to answer the child.

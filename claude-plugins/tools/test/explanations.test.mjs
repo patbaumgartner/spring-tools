@@ -20,6 +20,7 @@ import {
     checkPlaybook,
     collectCodes,
     collectPlaybooks,
+    allowedDocumentationUrl,
     extractUrls,
     parseTodoTable,
     runChecks,
@@ -91,4 +92,26 @@ test('coverage table parser reads code rows and playbook marks', () => {
 test('url extraction strips anchors and trailing punctuation and de-duplicates', () => {
     const urls = extractUrls('see https://docs.spring.io/a.html#x, https://docs.spring.io/a.html) and (https://spring.io/b).');
     assert.deepEqual(urls, ['https://docs.spring.io/a.html', 'https://spring.io/b']);
+    assert.deepEqual(extractUrls('Example: `https://example.com`\n```java\nString url = "https://example.com";\n```'), []);
+});
+
+test('documentation link checks reject non-documentation hosts and unsafe URL schemes', () => {
+    assert.equal(allowedDocumentationUrl('https://docs.spring.io/spring-boot/reference/'), true);
+    assert.equal(allowedDocumentationUrl('https://github.com/spring-projects/spring-boot'), true);
+    assert.equal(allowedDocumentationUrl('https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/util/Properties.html'), true);
+    assert.equal(allowedDocumentationUrl('https://openjdk.org/jeps/486'), true);
+    assert.equal(allowedDocumentationUrl('https://yaml.org/spec/1.2.2/'), true);
+    assert.equal(allowedDocumentationUrl('https://raw.githubusercontent.com/spring-projects/spring-security/5.8.x/docs/example.adoc'), true);
+    assert.equal(allowedDocumentationUrl('https://github.com/attacker/repo'), false);
+    assert.equal(allowedDocumentationUrl('https://raw.githubusercontent.com/attacker/repo/main/file'), false);
+    assert.equal(allowedDocumentationUrl('https://openjdk.org/'), false);
+    assert.equal(allowedDocumentationUrl('https://127.0.0.1/admin'), false);
+    assert.equal(allowedDocumentationUrl('http://spring.io/'), false);
+    assert.equal(allowedDocumentationUrl('javascript:alert(1)'), false);
+});
+
+test('selected diagnostic codes cannot escape the explanations directory', () => {
+    const result = runChecks({ root: fixtureRoot, codes: ['../../TODO_quickfixes'] });
+    assert.ok(result.errors.some((error) => /invalid diagnostic code/.test(error)));
+    assert.ok(!result.errors.some((error) => /missing playbook/.test(error)));
 });

@@ -9,8 +9,11 @@
  *     Broadcom - initial API and implementation
  *******************************************************************************/
 
-// Consistency rules between the Claude plugin configuration (manifest, hooks,
-// skills, agents) and the MCP tools implemented by the language server.
+// Consistency rules between the plugin configuration (manifests, hooks, skills,
+// agents) and the MCP tools implemented by the language server. The plugin is loaded by two
+// clients: Claude Code reads `.claude-plugin/plugin.json`, `hooks/hooks.json` and `agents/`,
+// GitHub Copilot CLI reads the Agent Plugins 1.0 manifests (`plugin.json`, `mcp.json`) and the
+// `com.github.copilot/` directory. Both sets must stay in sync.
 
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { basename, join } from 'node:path';
@@ -21,6 +24,9 @@ export const MCP_SERVER_NAME = 'spring-tools-mcp';
 export const PLUGIN_NAME = 'spring-tools';
 export const HOOK_SERVER = `plugin:${PLUGIN_NAME}:${MCP_SERVER_NAME}`;
 export const SCOPED_TOOL_PREFIX = `mcp__plugin_${PLUGIN_NAME}_${MCP_SERVER_NAME}__`;
+export const COPILOT_DIR = 'com.github.copilot';
+export const PLUGIN_SCHEMA = 'https://agent-plugins.org/schemas/1.0.0/plugin.schema.json';
+export const MCP_SCHEMA = 'https://agent-plugins.org/schemas/1.0.0/mcp.schema.json';
 
 /**
  * Reads the `@Tool` annotated methods of the language server's MCP components.
@@ -359,17 +365,52 @@ export function checkEvals(evalsDir, tools, skillNames, agentNames) {
             errors.push(`evals/${name}: no graders`);
         }
         for (const grader of graders) {
-            const data = parseFrontMatter(readFileSync(join(gradersDir, grader), 'utf8'));
+            const graderText = readFileSync(join(gradersDir, grader), 'utf8');
+            const data = parseFrontMatter(graderText);
             if (!data?.type) {
                 errors.push(`evals/${name}/graders/${grader}: no type in front matter`);
                 continue;
+            }
+            const graderWhere = `evals/${name}/graders/${grader}`;
+            if (!['tool_used', 'regex', 'llm'].includes(data.type)) {
+                errors.push(`${graderWhere}: unsupported grader type '${data.type}'`);
+                continue;
+            }
+            const weight = Number(data.weight ?? 1);
+            if (!Number.isFinite(weight) || weight <= 0) {
+                errors.push(`${graderWhere}: weight must be a positive number`);
+            }
+            if (data.type === 'regex') {
+                if (typeof data.pattern !== 'string' || !data.pattern) {
+                    errors.push(`${graderWhere}: regex grader needs a non-empty pattern`);
+                } else {
+                    try { new RegExp(data.pattern, data.flags ?? ''); } catch (error) {
+                        errors.push(`${graderWhere}: invalid regex (${error.message})`);
+                    }
+                }
+            }
+            if (data.type === 'llm' && !graderText.replace(/^---[\s\S]*?\r?\n---\r?\n/, '').trim()) {
+                errors.push(`${graderWhere}: llm grader rubric is empty`);
             }
             if (data.type !== 'tool_used') {
                 continue;
             }
             const tool = data.tool ?? '';
+            if (!tool) {
+                errors.push(`${graderWhere}: tool_used grader needs a tool`);
+            }
             if (tool.startsWith(SCOPED_TOOL_PREFIX) && !tools.has(tool.slice(SCOPED_TOOL_PREFIX.length))) {
-                errors.push(`evals/${name}/graders/${grader}: MCP tool '${tool}' does not exist`);
+                errors.push(`${graderWhere}: MCP tool '${tool}' does not exist`);
+            }
+            if (data.input_match !== undefined) {
+                try { new RegExp(data.input_match); } catch (error) {
+                    errors.push(`${graderWhere}: invalid input_match regex (${error.message})`);
+                }
+            }
+            const min = data.min === undefined ? 1 : Number(data.min);
+            const max = data.max === undefined ? Number.POSITIVE_INFINITY : Number(data.max);
+            if (!Number.isFinite(min) || min < 0 || Number.isNaN(max) || max < min) {
+                errors.push(`${graderWhere}: min/max must define non-negative occurrence bounds with max >= min`);
             }
             if (tool === 'Skill' && data.input_match) {
                 const skill = data.input_match.match(/\)\?([\w-]+)"/)?.[1];
@@ -461,4 +502,158 @@ export function checkManifest(pluginJson, marketplaceJson, root) {
         errors.push(`marketplace.json source '${entry.source}' does not point at a plugin directory`);
     }
     return errors;
+}
+
+// The Agent Plugins 1.0 plugin schema is closed: anything else (for example displayName) is rejected.
+const AGENT_PLUGIN_FIELDS = ['$schema', 'name', 'version', 'description', 'author', 'homepage', 'repository', 'license', 'keywords', 'extensions'];
+
+/**
+ * Validates the Agent Plugins 1.0 manifests that GitHub Copilot CLI reads (plugin.json and
+ * mcp.json in the plugin root) and keeps their shared fields in sync with the Claude Code manifest.
+ */
+export function checkAgentPluginManifest(pluginJson, mcpJson, claudeJson, root) {
+    const errors = [];
+    if (pluginJson.$schema !== PLUGIN_SCHEMA) {
+        errors.push(`plugin.json $schema must be '${PLUGIN_SCHEMA}'`);
+    }
+    for (const key of Object.keys(pluginJson)) {
+        if (!AGENT_PLUGIN_FIELDS.includes(key)) {
+            errors.push(`plugin.json: '${key}' is not allowed by the Agent Plugins schema (allowed: ${AGENT_PLUGIN_FIELDS.join(', ')})`);
+        }
+    }
+    if (pluginJson.name !== PLUGIN_NAME) {
+        errors.push(`plugin.json name must be '${PLUGIN_NAME}'`);
+    }
+    if (typeof pluginJson.author !== 'object' || !pluginJson.author?.name) {
+        errors.push('plugin.json author must be an object with a name');
+    }
+    for (const key of ['name', 'version', 'description']) {
+        if (pluginJson[key] !== claudeJson[key]) {
+            errors.push(`plugin.json ${key} differs from .claude-plugin/plugin.json ('${pluginJson[key]}' vs '${claudeJson[key]}')`);
+        }
+    }
+
+    if (mcpJson.$schema !== MCP_SCHEMA) {
+        errors.push(`mcp.json $schema must be '${MCP_SCHEMA}'`);
+    }
+    for (const key of Object.keys(mcpJson)) {
+        if (key !== '$schema' && key !== 'mcpServers') {
+            errors.push(`mcp.json: unexpected key '${key}'`);
+        }
+    }
+    const server = mcpJson.mcpServers?.[MCP_SERVER_NAME];
+    if (!server) {
+        errors.push(`mcp.json must declare mcpServers.${MCP_SERVER_NAME}`);
+        return errors;
+    }
+    if (server.type !== 'stdio') {
+        errors.push(`mcp.json ${MCP_SERVER_NAME}.type must be 'stdio'`);
+    }
+    if (server.command !== 'node') {
+        errors.push(`mcp.json ${MCP_SERVER_NAME}.command must be 'node' (the command is a single token and is not placeholder-expanded)`);
+    }
+    const launcher = (server.args ?? []).find((a) => a.endsWith('/launcher.js'));
+    if (!launcher || !launcher.startsWith('${PLUGIN_ROOT}/')) {
+        errors.push(`mcp.json ${MCP_SERVER_NAME}.args must launch \${PLUGIN_ROOT}/launcher.js (only \${PLUGIN_ROOT} and \${PLUGIN_DATA} are expanded)`);
+    } else if (root && !existsSync(join(root, PLUGIN_DIR, 'launcher.js'))) {
+        errors.push('launcher.js is missing from the plugin directory');
+    }
+    for (const key of Object.keys(server.env ?? {})) {
+        if (key === 'PLUGIN_ROOT' || key === 'PLUGIN_DATA') {
+            errors.push(`mcp.json ${MCP_SERVER_NAME}.env must not redefine '${key}' (the client provides it)`);
+        }
+    }
+    return errors;
+}
+
+// Copilot hook events are lowerCamelCase; the PascalCase spellings are the Claude Code ones.
+const COPILOT_HOOK_EVENTS = ['sessionStart', 'userPromptSubmit', 'preToolUse', 'postToolUse', 'sessionEnd'];
+
+/**
+ * Validates com.github.copilot/hooks/hooks.json. Copilot only understands command hooks - a Claude
+ * `mcp_tool` hook or a PascalCase event name makes it reject the whole file at startup.
+ */
+export function checkCopilotHooks(hooksJson, root) {
+    const errors = [];
+    if (hooksJson.version !== 1) {
+        errors.push(`${COPILOT_DIR}/hooks/hooks.json: version must be 1`);
+    }
+    const events = Object.entries(hooksJson.hooks ?? {});
+    if (events.length === 0) {
+        errors.push(`${COPILOT_DIR}/hooks/hooks.json declares no hooks`);
+    }
+    for (const [event, entries] of events) {
+        if (!COPILOT_HOOK_EVENTS.includes(event)) {
+            errors.push(`${COPILOT_DIR}/hooks/hooks.json: unknown event '${event}' (expected one of ${COPILOT_HOOK_EVENTS.join(', ')})`);
+            continue;
+        }
+        if (!Array.isArray(entries)) {
+            errors.push(`${COPILOT_DIR}/hooks/hooks.json: '${event}' must be an array of hooks`);
+            continue;
+        }
+        for (const hook of entries) {
+            const where = `${COPILOT_DIR}/hooks/hooks.json ${event}`;
+            if (hook.type !== 'command') {
+                errors.push(`${where}: type '${hook.type}' is not supported, Copilot only runs 'command' hooks`);
+                continue;
+            }
+            if (typeof hook.bash !== 'string' || !hook.bash) {
+                errors.push(`${where}: command hook without a 'bash' command`);
+            }
+            if (typeof hook.powershell !== 'string' || !hook.powershell) {
+                errors.push(`${where}: command hook without a 'powershell' command, it would not run on Windows`);
+            }
+            for (const command of [hook.bash, hook.powershell]) {
+                for (const match of String(command ?? '').matchAll(/\$(?:env:)?PLUGIN_ROOT\/([\w./-]+)/g)) {
+                    if (root && !existsSync(join(root, PLUGIN_DIR, match[1]))) {
+                        errors.push(`${where}: '${match[1]}' does not exist in the plugin directory`);
+                    }
+                }
+            }
+        }
+    }
+    return errors;
+}
+
+/**
+ * Validates the Copilot copy of an agent against the Claude Code original: same instructions, and
+ * front matter restricted to supported fields. Copilot custom agents support a `tools` allowlist.
+ */
+export function checkCopilotAgent(fileName, copilotText, claudeText) {
+    const errors = [];
+    const expectedName = basename(fileName).replace(/\.agent\.md$/, '');
+    const front = parseFrontMatter(copilotText);
+    if (!front) {
+        return [`${COPILOT_DIR}/agents/${fileName}: agent file has no YAML front matter`];
+    }
+    const where = `${COPILOT_DIR}/agents/${fileName}`;
+    if (front.name !== expectedName) {
+        errors.push(`${where}: front matter name '${front.name}' differs from file name '${expectedName}'`);
+    }
+    for (const key of Object.keys(front)) {
+        if (!['name', 'description', 'tools'].includes(key)) {
+            errors.push(`${where}: '${key}' is not supported by Copilot custom agents`);
+        }
+    }
+    if (front.tools !== undefined
+        && !(typeof front.tools === 'string' || (Array.isArray(front.tools) && front.tools.every((tool) => typeof tool === 'string')))) {
+        errors.push(`${where}: 'tools' must be a string or a list of strings`);
+    }
+    if (claudeText === undefined) {
+        errors.push(`${where}: no matching agents/${expectedName}.md for Claude Code`);
+        return errors;
+    }
+    const claudeFront = parseFrontMatter(claudeText);
+    if (front.description !== claudeFront?.description) {
+        errors.push(`${where}: description differs from agents/${expectedName}.md`);
+    }
+    if (agentBody(copilotText) !== agentBody(claudeText)) {
+        errors.push(`${where}: instructions differ from agents/${expectedName}.md, the two copies must stay identical`);
+    }
+    return errors;
+}
+
+/** The instructions of an agent file, i.e. everything below the front matter. */
+function agentBody(text) {
+    return text.replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n/, '').trim();
 }

@@ -9,31 +9,43 @@
  * Contributors:
  *     Broadcom - initial API and implementation
  *******************************************************************************/
-// Starts the standalone Spring Boot language server as an MCP stdio server for Claude Code.
+// Starts the standalone Spring Boot language server as an MCP stdio server for Claude Code,
+// GitHub Copilot CLI, Codex and OpenCode.
 // Environment (all optional):
-//   SPRING_TOOLS_JAVA       java executable to use (else $JAVA_HOME/bin/java, else java on PATH; first with Java 21+ wins)
-//   SPRING_TOOLS_JAVA_OPTS  extra JVM options, e.g. "-Xmx2g" (appended after the defaults, so they override them)
-//   SPRING_TOOLS_LS_JAR     path to a local language server JAR to run instead of the downloaded one
-//   SPRING_TOOLS_LS_WATCH   "false" disables the built-in file watcher (the hooks then remain the only way the index learns about changes)
+//   SPRING_TOOLS_JAVA        java executable to use (else $JAVA_HOME/bin/java, else java on PATH; first with Java 21+ wins)
+//   SPRING_TOOLS_JAVA_OPTS   extra JVM options, e.g. "-Xmx2g" (appended after the defaults, so they override them)
+//   SPRING_TOOLS_LS_JAR      path to a local language server JAR to run instead of the downloaded one
+//   SPRING_TOOLS_LS_WATCH    "false" disables the built-in file watcher; use hooks or explicit change tools to update the index
+//   SPRING_TOOLS_PROJECT_DIR workspace directory to index, overriding the auto-detection below
+//   SPRING_TOOLS_DATA_DIR    persistent log/runtime directory (else use client data dir or ~/.spring-tools/data)
 'use strict';
 
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 const { spawn, spawnSync } = require('child_process');
-const { ensureJar, JAR_NAME } = require('./install.js');
+const { ensureJar, JAR_NAME, defaultInstallDir } = require('./install.js');
 
 const MIN_JAVA_MAJOR = 21;
 
-// Shown to Claude alongside the tool names when MCP tool search defers the full tool list.
+// Shown to the client alongside the tool names when MCP tool search defers the full tool list.
 const SERVER_INSTRUCTIONS = [
     'Spring Tools language server for the Spring Boot projects in this workspace.',
     'Start with getProjectList (use the projectName field, location is the project root directory; retry while the list is still empty right after startup, the project model is being resolved).',
-    'getProjectDiagnostics reports Spring-specific problems with a code such as JAVA_PUBLIC_BEAN_METHOD; every code has a fix playbook, apply it with the /spring-tools:quickfix skill and validate whole projects with /spring-tools:validate.',
+    'getProjectDiagnostics reports Spring-specific problems with a code such as JAVA_PUBLIC_BEAN_METHOD; every code has a fix playbook. Use the quickfix skill when available, or read the matching explanations/<CODE>.md file, then validate the project with the validate skill or getProjectDiagnostics.',
     'Bean wiring: getBeanDetails, findBeansByType, getBeanUsageInfo. Endpoints: getRequestMappings, findRequestMappingsByMethod. Build facts: getSpringBootVersion, getJavaVersion, getResolvedProjectClasspath.',
     'Architecture: getLogicalStructure, getStereotypesList, findComponentsByStereotype and the logical-structure baseline tools. Spring versions and support: getReleases, getGenerations, getUpcomingReleases, getLatestReleaseInformation.',
-    'Architecture and structure questions: /spring-tools:architecture; bean wiring: /spring-tools:beans; endpoints: /spring-tools:endpoints; build facts: /spring-tools:project-info; release and support dates: /spring-tools:spring-versions.',
+    'For guidance, use the matching Spring Tools skill when available: architecture and structure, beans, endpoints, project-info, or spring-versions.',
     'The server watches the workspace directory, so edits, new files and new projects are picked up within a second without any notification; call fileChanged/fileDeleted only when a change might have been missed and refreshWorkspace when the index looks stale (e.g. after a large git checkout).',
 ].join(' ');
+
+/**
+ * Server instructions with the absolute location of the fix playbooks appended. Clients that do not
+ * substitute path placeholders in skill and agent files learn where the playbooks are this way.
+ */
+function serverInstructions(pluginRoot = __dirname) {
+    return `${SERVER_INSTRUCTIONS} The fix playbooks are the <CODE>.md files in ${path.join(pluginRoot, 'explanations')}.`;
+}
 
 /** Major Java version from `java -version` output; null when unparseable. */
 function parseJavaMajor(output) {
@@ -123,7 +135,71 @@ function watchEnabled(value) {
     return !/^\s*(false|0|no|off)\s*$/i.test(value || '');
 }
 
-function buildJavaArgs({ jarPath, dataDir, projectDir, watch = true, extraOpts = [] }) {
+function resolveDataDir({ env = process.env, home = os.homedir() } = {}) {
+    return path.resolve(env.SPRING_TOOLS_DATA_DIR || env.CLAUDE_PLUGIN_DATA || env.PLUGIN_DATA || path.join(home, '.spring-tools', 'data'));
+}
+
+function isDirectory(dir) {
+    try {
+        return fs.statSync(dir).isDirectory();
+    } catch {
+        return false;
+    }
+}
+
+/** An absolute, existing directory that is not the plugin's own root (which is never a workspace). */
+function usableProjectDir(dir, pluginRoot) {
+    return !!dir && path.isAbsolute(dir) && path.resolve(dir) !== path.resolve(pluginRoot) && isDirectory(dir);
+}
+
+/**
+ * GitHub Copilot CLI starts plugin MCP servers with the plugin root as working directory and passes
+ * no workspace path, but it records the session's directory before starting them.
+ */
+function copilotWorkspaceDir(env, home) {
+    const session = env.COPILOT_AGENT_SESSION_ID;
+    // A session id is a single path segment; anything else would escape the session-state directory.
+    if (!session || !/^[\w.-]+$/.test(session) || session === '.' || session === '..') {
+        return null;
+    }
+    try {
+        const state = fs.readFileSync(path.join(home, '.copilot', 'session-state', session, 'workspace.yaml'), 'utf8');
+        return /^cwd:[ \t]*(.+?)[ \t]*$/m.exec(state)?.[1] ?? null;
+    } catch {
+        return null;
+    }
+}
+
+/**
+ * Workspace the language server should index. Claude Code exports CLAUDE_PROJECT_DIR; Copilot CLI
+ * runs it in the plugin directory, so the workspace has to be recovered from session state. Other
+ * plugin hosts may also change the MCP process cwd, so prefer the inherited PWD to that fallback.
+ * @returns {{dir: string, source: string, detected: boolean}}
+ */
+function resolveProjectDir({ env = process.env, cwd = process.cwd(), pluginRoot = __dirname, home = os.homedir() } = {}) {
+    const override = env.SPRING_TOOLS_PROJECT_DIR;
+    if (override) {
+        const dir = path.resolve(cwd, override);
+        if (!isDirectory(dir)) {
+            throw new Error(`SPRING_TOOLS_PROJECT_DIR is not an existing directory: ${dir}`);
+        }
+        return { dir, source: 'SPRING_TOOLS_PROJECT_DIR', detected: true };
+    }
+    const candidates = [
+        { dir: env.CLAUDE_PROJECT_DIR, source: 'CLAUDE_PROJECT_DIR' },
+        { dir: copilotWorkspaceDir(env, home), source: 'Copilot session state' },
+        { dir: env.PWD, source: 'PWD' },
+        { dir: cwd, source: 'working directory' },
+    ];
+    for (const candidate of candidates) {
+        if (usableProjectDir(candidate.dir, pluginRoot)) {
+            return { dir: path.resolve(candidate.dir), source: candidate.source, detected: true };
+        }
+    }
+    return { dir: path.resolve(cwd), source: 'working directory', detected: false };
+}
+
+function buildJavaArgs({ jarPath, dataDir, projectDir, watch = true, extraOpts = [], instructions = serverInstructions() }) {
     return [
         '-Xmx1024m',
         '-Djdk.util.zip.disableZip64ExtraFieldValidation=true',
@@ -132,7 +208,7 @@ function buildJavaArgs({ jarPath, dataDir, projectDir, watch = true, extraOpts =
         `-Dlogging.file.name=${path.join(dataDir, 'boot-ls.log')}`,
         '-Dlogging.level.root=INFO',
         '-Dspring.ai.mcp.server.stdio=true',
-        `-Dspring.ai.mcp.server.instructions=${SERVER_INSTRUCTIONS}`,
+        `-Dspring.ai.mcp.server.instructions=${instructions}`,
         // Only the MCP tools are exposed over stdio; nothing connects to the LSP transport.
         '-Dlanguageserver.enabled=false',
         `-Dspring.boot.ls.project.dir=${projectDir}`,
@@ -153,19 +229,25 @@ async function resolveJar(log) {
         log(`Using language server JAR from SPRING_TOOLS_LS_JAR: ${jarPath}`);
         return jarPath;
     }
-    const jarPath = path.join(__dirname, 'language-server', JAR_NAME);
+    const jarDest = defaultInstallDir(__dirname);
+    const jarPath = path.join(jarDest, JAR_NAME);
     if (!fs.existsSync(jarPath)) {
-        log(`${JAR_NAME} not found, downloading it (first start of this plugin version). If Claude Code reports the MCP server as failed before the download finishes, reconnect it from /mcp.`);
+        log(`${JAR_NAME} not found, downloading it (first start of this plugin version). If the client reports the MCP server as failed before the download finishes, reconnect it after the download completes.`);
     }
-    return (await ensureJar({ pluginRoot: __dirname, ifMissing: true, log })).jarPath;
+    return (await ensureJar({ pluginRoot: __dirname, dest: jarDest, ifMissing: true, log })).jarPath;
 }
 
 async function start() {
     const log = (line) => console.error(`[spring-tools] ${line}`);
-    // Claude Code exports these to plugin MCP servers. The plugin root changes on every plugin
-    // update, so runtime state such as the log file goes to the persistent data dir.
-    const projectDir = process.env.CLAUDE_PROJECT_DIR || process.cwd();
-    const dataDir = process.env.CLAUDE_PLUGIN_DATA || __dirname;
+    // The plugin root changes on every plugin update, so runtime state such as the log file goes to
+    // the persistent data dir both clients export (PLUGIN_DATA is the Agent Plugins spelling).
+    const project = resolveProjectDir();
+    const dataDir = resolveDataDir();
+    if (project.detected) {
+        log(`Indexing ${project.dir} (from ${project.source})`);
+    } else {
+        throw new Error(`Could not determine the workspace directory; refusing to index the plugin directory ${project.dir}. Set SPRING_TOOLS_PROJECT_DIR in the MCP server environment to the workspace root. For Codex, configure the server env explicitly; exporting a variable in the parent shell may not forward it.`);
+    }
 
     const picked = pickJava(javaCandidates());
     if (!picked.java) {
@@ -179,17 +261,22 @@ async function start() {
     if (!watch) {
         log('File watcher disabled by SPRING_TOOLS_LS_WATCH; the index only follows the plugin hooks and explicit fileChanged/refreshWorkspace calls.');
     }
-    const javaArgs = buildJavaArgs({ jarPath, dataDir, projectDir, watch, extraOpts: splitOpts(process.env.SPRING_TOOLS_JAVA_OPTS) });
+    const javaArgs = buildJavaArgs({ jarPath, dataDir, projectDir: project.dir, watch, extraOpts: splitOpts(process.env.SPRING_TOOLS_JAVA_OPTS) });
     const child = spawn(picked.java, javaArgs, { stdio: 'inherit', windowsHide: true });
 
-    // Claude Code terminates this launcher when the session ends; forward that to the JVM so it
+    // The client terminates this launcher when the session ends; forward that to the JVM so it
     // does not linger as an orphan. The server shuts down gracefully within about a second.
+    let shutdownSignal = null;
+    let forceKillTimer;
     for (const signal of ['SIGINT', 'SIGTERM', 'SIGQUIT']) {
-        process.on(signal, () => {
+        process.once(signal, () => {
+            shutdownSignal = signal;
             if (!child.killed) {
                 child.kill('SIGTERM');
             }
-            process.exit(0);
+            // Give the language server time to flush logs and release workspace resources.
+            forceKillTimer = setTimeout(() => child.kill('SIGKILL'), 5000);
+            forceKillTimer.unref();
         });
     }
 
@@ -198,7 +285,10 @@ async function start() {
         process.exit(1);
     });
     child.on('close', (code, signal) => {
-        if (code !== 0) {
+        clearTimeout(forceKillTimer);
+        if (shutdownSignal) {
+            process.exit(0);
+        } else if (code !== 0) {
             log(`Language server exited with ${signal ? `signal ${signal}` : `code ${code}`}; see ${path.join(dataDir, 'boot-ls.log')}`);
         }
         process.exit(code ?? 1);
@@ -212,4 +302,4 @@ if (require.main === module) {
     });
 }
 
-module.exports = { MIN_JAVA_MAJOR, SERVER_INSTRUCTIONS, parseJavaMajor, javaCandidates, pickJava, splitOpts, watchEnabled, buildJavaArgs };
+module.exports = { MIN_JAVA_MAJOR, SERVER_INSTRUCTIONS, serverInstructions, parseJavaMajor, javaCandidates, pickJava, splitOpts, watchEnabled, buildJavaArgs, resolveProjectDir, resolveDataDir };

@@ -19,26 +19,31 @@
 //
 // Prints one PASS/FAIL line per check and ends with "SMOKE PASSED" only when every check passed.
 
-import { execSync, spawn } from 'node:child_process';
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { execFileSync, spawn } from 'node:child_process';
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
+import { createRequire } from 'node:module';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(here, '..', '..', '..');
 const pluginDir = join(repoRoot, 'claude-plugins', 'spring-tools');
 const JAR_NAME = 'spring-boot-language-server-standalone-exec.jar';
+const { defaultInstallDir } = createRequire(import.meta.url)(join(pluginDir, 'install.js'));
 
 const args = process.argv.slice(2);
 const option = (name) => (args.includes(name) ? args[args.indexOf(name) + 1] : undefined);
 const projectSrc = resolve(option('--project-src') ?? join(repoRoot, 'headless-services/spring-boot-language-server/src/test/resources/test-projects/sf7-validation'));
 const keep = args.includes('--keep');
 
-const jarPath = process.env.SPRING_TOOLS_LS_JAR || join(pluginDir, 'language-server', JAR_NAME);
+// Prefer the freshly built test artifact so CI always exercises the source it just compiled;
+// otherwise reuse the normal versioned persistent install cache used by launcher.js.
+const localBuildJar = join(pluginDir, 'language-server', JAR_NAME);
+const jarPath = process.env.SPRING_TOOLS_LS_JAR || (existsSync(localBuildJar) ? localBuildJar : join(defaultInstallDir(pluginDir), JAR_NAME));
 if (!existsSync(jarPath)) {
-    console.error(`language server JAR not found at ${jarPath}; run claude-plugins/update-local-jars.sh or set SPRING_TOOLS_LS_JAR`);
+    console.error(`language server JAR not found at ${jarPath}; build the local test JAR with claude-plugins/update-local-jars.sh or set SPRING_TOOLS_LS_JAR`);
     process.exit(2);
 }
 if (!existsSync(join(projectSrc, 'pom.xml')) && !existsSync(join(projectSrc, 'build.gradle'))) {
@@ -97,6 +102,13 @@ const call = async (name, toolArgs = {}) => {
 };
 const projectNames = (text) => [...text.replace(/\\"/g, '"').matchAll(/"projectName"\s*:\s*"([^"]+)"/g)].map((m) => m[1]);
 const codesOf = (text) => [...new Set([...text.matchAll(/"code"\s*:\s*"([A-Za-z_0-9]+)"/g)].map((m) => m[1]))];
+function javaFilesUnder(directory) {
+    if (!existsSync(directory)) return [];
+    return readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
+        const path = join(directory, entry.name);
+        return entry.isDirectory() ? javaFilesUnder(path) : (entry.isFile() && entry.name.endsWith('.java') ? [path] : []);
+    });
+}
 
 async function pollUntil(fn, predicate, attempts, intervalMs) {
     let value;
@@ -163,7 +175,7 @@ try {
     check(/TestController|Config/.test(beans.text), 'getBeanDetails lists the fixture beans');
 
     // Same input shape as the PostToolUse Edit|Write hook: edit a Java file, then fileChanged {filePath}.
-    const javaFiles = execSync(`find "${join(projectDir, 'src/main/java')}" -name '*.java'`, { encoding: 'utf8' }).trim().split('\n').filter(Boolean);
+    const javaFiles = javaFilesUnder(join(projectDir, 'src/main/java'));
     const target = javaFiles.find((f) => /class \w+ \{/.test(readFileSync(f, 'utf8')));
     const original = readFileSync(target, 'utf8');
     writeFileSync(target, original.replace(/class (\w+) \{/, 'class $1 {\n\t@org.springframework.beans.factory.annotation.Autowired\n\tpublic $1() {}\n'));
@@ -231,15 +243,21 @@ try {
     child.kill('SIGTERM');
     if (process.platform !== 'win32') {
         // The JVM must not outlive the launcher; graceful shutdown takes about a second.
-        const survivors = `pgrep -f '[s]pring-boot-language-server-standalone-exec.jar' || true`;
         let alive = '';
         for (let i = 0; i < 30; i++) {
-            alive = execSync(survivors, { encoding: 'utf8' }).trim();
+            try {
+                alive = execFileSync('pgrep', ['-f', '[s]pring-boot-language-server-standalone-exec.jar'], { encoding: 'utf8' }).trim();
+            } catch (error) {
+                if (error.status === 1) alive = '';
+                else throw error;
+            }
             if (!alive) break;
             await sleep(1000);
         }
         check(alive === '', `no orphaned JVM after SIGTERM to the launcher (${Date.now() - killed} ms${alive ? `, survivors: ${alive}` : ''})`);
-        if (alive) execSync(`pkill -f '[s]pring-boot-language-server-standalone-exec.jar' || true`);
+        if (alive) {
+            try { execFileSync('pkill', ['-f', '[s]pring-boot-language-server-standalone-exec.jar']); } catch { /* the process may have exited between the check and cleanup */ }
+        }
     }
     const failed = results.filter((r) => !r).length;
     if (failed) {
