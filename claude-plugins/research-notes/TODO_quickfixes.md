@@ -11,10 +11,11 @@ Use this as a TODO list to implement missing explanation playbooks (`.md` files)
 | `PATH_IN_CONTROLLER_ANNOTATION` | Controller annotation default attribute might contain a path | OpenRewrite: `org.openrewrite.java.spring.boot2.NoPathInControllerAnnotation` | ✅ |
 | `JAVA_AUTOWIRED_CONSTRUCTOR` | Unnecessary `@Autowired` over the only constructor | JDT Refactoring (`NoAutowiredOnConstructorReconciler`) | ❌ |
 | `JAVA_PUBLIC_BEAN_METHOD` | Public modifier on `@Bean` method | JDT Refactoring (`BeanMethodNotPublicReconciler`) | ✅ |
-| `JAVA_TEST_SPRING_EXTENSION` | Unnecessary `@SpringExtension` | OpenRewrite: `org.openrewrite.java.spring.boot2.UnnecessarySpringExtension` | ❌ |
+| `JAVA_TEST_SPRING_EXTENSION` | Unnecessary `@SpringExtension` | OpenRewrite: `org.openrewrite.java.spring.boot2.UnnecessarySpringExtension` | ✅ |
 | `JAVA_CONSTRUCTOR_PARAMETER_INJECTION` | Use constructor parameter injection | OpenRewrite: `org.springframework.ide.vscode.commons.rewrite.java.ConvertAutowiredFieldIntoConstructorParameter` | ✅ |
 | `JAVA_PRECISE_REQUEST_MAPPING` | Use precise mapping annotation | OpenRewrite: `org.openrewrite.java.spring.NoRequestMappingAnnotation` | ✅ |
 | `JAVA_REPOSITORY` | Unnecessary `@Repository` | JDT Refactoring (`NoRepoAnnotationReconciler`) | ❌ |
+| `JAVA_PRECISE_SCOPE` | Use precise scope annotation (`@RequestScope`, `@SessionScope`, `@ApplicationScope`) | JDT Refactoring (`ScopeAnnotationReconciler` / `ReplaceScopeAnnotationRefactoring`) | ✅ |
 | `JAVA_LAMBDA_DSL` | Consider switching to Lambda DSL syntax | OpenRewrite: `org.openrewrite.java.spring.security5.HttpSecurityLambdaDsl` | ✅ |
 | `MISSING_CONFIGURATION_ANNOTATION` | Missing `@Configuration` | OpenRewrite: `org.openrewrite.java.spring.boot2.AddConfigurationAnnotationIfBeansPresent` | ✅ |
 | `HTTP_SECURITY_AUTHORIZE_HTTP_REQUESTS` | Usage of old `HttpSecurity.authorizeRequests(...)` | OpenRewrite: `org.openrewrite.java.spring.security5.AuthorizeHttpRequests` | ✅ |
@@ -25,6 +26,9 @@ Use this as a TODO list to implement missing explanation playbooks (`.md` files)
 | `WEB_CONFIGURER_CONFIGURATION` | Missing `@Configuration` on web configurer | OpenRewrite: `org.openrewrite.java.spring.boot2.AddConfigurationAnnotation` | ❌ |
 | `MISSING_VALIDATED_ANNOTATION` | Missing `@Validated` on component | OpenRewrite: `org.openrewrite.java.spring.boot2.AddValidatedAnnotation` | ❌ |
 | `JAVA_FINAL_AUTOWIRED_FIELD` | `@Autowired` field should not be `final` | *None* | ❌ |
+| `EXTRACT_REQUEST_MAPPING_PARENT_PATH` | Request mappings share a common parent path that could be extracted into a class-level `@RequestMapping` | JDT Refactoring (`ExtractRequestMappingParentPathReconciler` / `ExtractRequestMappingParentPathRefactoring`) | ✅ |
+| `REST_CONTROLLER_COMBINATION` | `@Controller` + `@ResponseBody` could use `@RestController` | JDT Refactoring (`RestControllerReconciler` / `RestControllerRefactoring`) | ✅ |
+| `SPRING_JUNIT_CONFIG_COMBINATION` | `@ExtendWith(SpringExtension.class)` + `@ContextConfiguration` could use `@SpringJUnitConfig` | JDT Refactoring (`SpringJUnitConfigReconciler` / `SpringJUnitConfigRefactoring`) | ✅ |
 
 ## Boot 3 Java Problem Types (`Boot3JavaProblemType`)
 
@@ -33,6 +37,7 @@ Use this as a TODO list to implement missing explanation playbooks (`.md` files)
 | `JAVA_TYPE_NOT_SUPPORTED` | Type not supported as of Spring Boot 3 | *None* | ❌ |
 | `FACTORIES_KEY_NOT_SUPPORTED` | Spring factories key not supported | *None* | ❌ |
 | `MODULITH_TYPE_REF_VIOLATION` | Modulith restricted type reference | *None* | ❌ |
+| `MODULITH_APPLICATION_MODULE_LISTENER` | `@Async` + `@Transactional` + `@TransactionalEventListener` could use `@ApplicationModuleListener` | JDT Refactoring (`ApplicationModuleListenerReconciler` / `ApplicationModuleListenerRefactoring`) | ✅ |
 
 ## Boot 4 Java Problem Types (`Boot4JavaProblemType`)
 

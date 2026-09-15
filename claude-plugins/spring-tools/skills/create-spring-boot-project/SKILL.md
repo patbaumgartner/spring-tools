@@ -1,11 +1,25 @@
 ---
 name: create-spring-boot-project
 description: Creates a new Spring Boot project by downloading it from start.spring.io using curl, then extracting it into the target directory. Use this when a user asks to create, generate, initialize, or scaffold a new Spring Boot project.
-arguments: [project_description]
-allowed-tools: Bash, View
+argument-hint: "<project description>"
+allowed-tools:
+  - Read
+  - Bash(java -version*)
+  - Bash(head *)
+  - Bash(grep *)
+  - Bash(set -o pipefail*)
+  - Bash(mkdir -p *)
+  - Bash(curl -sS *)
+  - Bash(curl -fsS https://start.spring.io/starter.tgz*)
+  - Bash(tar -xzf - -C *)
+  - Bash(ls -la *)
+  - Bash(test -f *)
+  - Bash(chmod +x mvnw gradlew)
+  - Bash(cd *)
+  - Bash(pwd)
 ---
 
-You are creating a new Spring Boot project based on the user's request: `$ARGUMENTS[0]`
+You are creating a new Spring Boot project based on the user's request: `$ARGUMENTS`
 
 ## Step 1: Detect the available JDK version
 
@@ -21,25 +35,26 @@ Parse the major version (e.g. `21`, `17`, `11`, `8`) from the output. If no JDK 
 
 Determine the following from the user's request (use defaults where not specified):
 
-| Parameter      | Default              | Notes                                              |
-|----------------|----------------------|----------------------------------------------------|
-| `type`         | `maven-project`      | `maven-project` or `gradle-project`                |
-| `language`     | `java`               | `java`, `kotlin`, or `groovy`                      |
-| `bootVersion`  | *(omit)*             | Omit to use the latest stable version automatically|
-| `groupId`      | `com.example`        |                                                    |
-| `artifactId`   | `demo`               | Derived from project name if given                 |
-| `name`         | same as `artifactId` | Becomes the main class name (`<Name>Application`)  |
-| `description`  | `Demo project`       |                                                    |
-| `packageName`  | `com.example.demo`   | `groupId` + `.` + `artifactId`                     |
-| `packaging`    | `jar`                | `jar` or `war`                                     |
-| `javaVersion`  | *(detected in Step 1)* | Override only if user explicitly asked           |
-| `dependencies` | *(none)*             | Comma-separated IDs from start.spring.io           |
+| Parameter      | Default                | Notes                                               |
+| -------------- | ---------------------- | --------------------------------------------------- |
+| `type`         | `maven-project`        | `maven-project` or `gradle-project`                 |
+| `language`     | `java`                 | `java`, `kotlin`, or `groovy`                       |
+| `bootVersion`  | _(omit)_               | Omit to use the latest stable version automatically |
+| `groupId`      | `com.example`          |                                                     |
+| `artifactId`   | `demo`                 | Derived from project name if given                  |
+| `name`         | same as `artifactId`   | Becomes the main class name (`<Name>Application`)   |
+| `description`  | `Demo project`         |                                                     |
+| `packageName`  | `com.example.demo`     | `groupId` + `.` + `artifactId`                      |
+| `packaging`    | `jar`                  | `jar` or `war`                                      |
+| `javaVersion`  | _(detected in Step 1)_ | Override only if user explicitly asked              |
+| `dependencies` | _(none)_               | Comma-separated IDs from start.spring.io            |
 
 Note that `name` is also used to derive the main application class file. A hyphenated `artifactId` like `my-service` will produce `MyServiceApplication.java`. If the user wants a specific class name, set `name` independently from `artifactId`.
 
 ### Finding Dependency IDs
 
 **Common IDs:**
+
 - **Web**: `web` (Spring Web / REST), `webflux` (Reactive Web), `graphql`, `thymeleaf`
 - **Data**: `data-jpa`, `data-mongodb`, `data-redis`, `jdbc`
 - **Database drivers**: `h2`, `postgresql`, `mysql`
@@ -69,7 +84,7 @@ The `bootVersion` query parameter is accepted but does not filter rows out of th
 
 ## Step 4: Download and extract the project
 
-*Note: The commands below are designed for macOS and Linux-based systems. If you are running on Windows, you MUST adapt these commands appropriately for your environment (e.g., downloading a `.zip` to a temporary file and extracting it using PowerShell, rather than piping binary data). Note that older Windows builds may ship a `tar` that does not support `-z`; `bsdtar` from Windows 10+ does.*
+_Note: The commands below are designed for macOS and Linux-based systems. If you are running on Windows, you MUST adapt these commands appropriately for your environment (e.g., downloading a `.zip` to a temporary file and extracting it using PowerShell, rather than piping binary data). Note that older Windows builds may ship a `tar` that does not support `-z`; `bsdtar` from Windows 10+ does._
 
 Use a `POST` request to `start.spring.io/starter.tgz` and pipe it directly into `tar`. This avoids URL encoding issues for the URL itself and avoids temporary files.
 
@@ -124,6 +139,7 @@ If you also have access to a tool that changes Claude Code's persistent working 
 ## Step 7: Report back to the user
 
 Report:
+
 - The directory where the project was extracted (and confirm that the working directory is now set to it)
 - The selected dependencies
 - The resolved `javaVersion` (and how it was detected)

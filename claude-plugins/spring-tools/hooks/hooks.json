@@ -1,85 +1,136 @@
 {
+  "description": "Keeps the Spring Tools language server index in sync with files Claude edits, and refreshes it after shell commands that change the working tree.",
   "hooks": {
     "PostToolUse": [
       {
-        "matcher": "Write",
+        "matcher": "Edit|Write",
         "hooks": [
           {
             "type": "mcp_tool",
-            "if": "Write(**/*.{java,kt,kts,groovy,xml,properties,yml,yaml,gradle})",
+            "if": "Edit(*.java)",
             "server": "plugin:spring-tools:spring-tools-mcp",
             "tool": "fileChanged",
             "input": {
               "filePath": "${tool_input.file_path}"
-            }
-          }
-        ]
-      },
-      {
-        "matcher": "StrReplace",
-        "hooks": [
+            },
+            "timeout": 30
+          },
           {
             "type": "mcp_tool",
-            "if": "StrReplace(**/*.{java,kt,kts,groovy,xml,properties,yml,yaml,gradle})",
+            "if": "Edit(*.kt)",
             "server": "plugin:spring-tools:spring-tools-mcp",
             "tool": "fileChanged",
             "input": {
               "filePath": "${tool_input.file_path}"
-            }
-          }
-        ]
-      },
-      {
-        "matcher": "Edit",
-        "hooks": [
+            },
+            "timeout": 30
+          },
           {
             "type": "mcp_tool",
-            "if": "Edit(**/*.{java,kt,kts,groovy,xml,properties,yml,yaml,gradle})",
+            "if": "Edit(*.kts)",
             "server": "plugin:spring-tools:spring-tools-mcp",
             "tool": "fileChanged",
             "input": {
               "filePath": "${tool_input.file_path}"
-            }
-          }
-        ]
-      },
-      {
-        "matcher": "Replace",
-        "hooks": [
+            },
+            "timeout": 30
+          },
           {
             "type": "mcp_tool",
-            "if": "Replace(**/*.{java,kt,kts,groovy,xml,properties,yml,yaml,gradle})",
+            "if": "Edit(*.groovy)",
             "server": "plugin:spring-tools:spring-tools-mcp",
             "tool": "fileChanged",
             "input": {
               "filePath": "${tool_input.file_path}"
-            }
-          }
-        ]
-      },
-      {
-        "matcher": "Delete",
-        "hooks": [
+            },
+            "timeout": 30
+          },
           {
             "type": "mcp_tool",
-            "if": "Delete(**/*.{java,kt,kts,groovy,xml,properties,yml,yaml,gradle})",
+            "if": "Edit(*.xml)",
             "server": "plugin:spring-tools:spring-tools-mcp",
-            "tool": "fileDeleted",
+            "tool": "fileChanged",
             "input": {
               "filePath": "${tool_input.file_path}"
-            }
+            },
+            "timeout": 30
+          },
+          {
+            "type": "mcp_tool",
+            "if": "Edit(*.properties)",
+            "server": "plugin:spring-tools:spring-tools-mcp",
+            "tool": "fileChanged",
+            "input": {
+              "filePath": "${tool_input.file_path}"
+            },
+            "timeout": 30
+          },
+          {
+            "type": "mcp_tool",
+            "if": "Edit(*.yml)",
+            "server": "plugin:spring-tools:spring-tools-mcp",
+            "tool": "fileChanged",
+            "input": {
+              "filePath": "${tool_input.file_path}"
+            },
+            "timeout": 30
+          },
+          {
+            "type": "mcp_tool",
+            "if": "Edit(*.yaml)",
+            "server": "plugin:spring-tools:spring-tools-mcp",
+            "tool": "fileChanged",
+            "input": {
+              "filePath": "${tool_input.file_path}"
+            },
+            "timeout": 30
+          },
+          {
+            "type": "mcp_tool",
+            "if": "Edit(*.gradle)",
+            "server": "plugin:spring-tools:spring-tools-mcp",
+            "tool": "fileChanged",
+            "input": {
+              "filePath": "${tool_input.file_path}"
+            },
+            "timeout": 30
           }
         ]
       },
       {
-        "matcher": "Bash",
+        "matcher": "Bash|PowerShell",
         "hooks": [
           {
             "type": "mcp_tool",
             "if": "Bash(git *)",
             "server": "plugin:spring-tools:spring-tools-mcp",
             "tool": "refreshWorkspace",
-            "input": {}
+            "input": {},
+            "timeout": 30
+          },
+          {
+            "type": "mcp_tool",
+            "if": "Bash(rm *)",
+            "server": "plugin:spring-tools:spring-tools-mcp",
+            "tool": "refreshWorkspace",
+            "input": {},
+            "timeout": 30
+          },
+          {
+            "type": "mcp_tool",
+            "if": "PowerShell(git *)",
+            "server": "plugin:spring-tools:spring-tools-mcp",
+            "tool": "refreshWorkspace",
+            "input": {},
+            "timeout": 30
+          },
+          {
+            "type": "mcp_tool",
+            "if": "PowerShell(Remove-Item *)",
+            "server": "plugin:spring-tools:spring-tools-mcp",
+            "tool": "refreshWorkspace",
+            "input": {},
+            "timeout": 30
           }
         ]
       }

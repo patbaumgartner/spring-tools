@@ -5,6 +5,11 @@ const { spawn, spawnSync } = require('child_process');
 const jarDir = path.join(__dirname, 'language-server');
 const jarPath = path.join(jarDir, 'spring-boot-language-server-standalone-exec.jar');
 
+// Claude Code exports these to plugin MCP servers. The plugin root changes on every
+// plugin update, so runtime state such as the log file goes to the persistent data dir.
+const projectDir = process.env.CLAUDE_PROJECT_DIR || process.cwd();
+const dataDir = process.env.CLAUDE_PLUGIN_DATA || __dirname;
+
 async function start() {
     // 1. Download the JAR if it doesn't exist
     if (!fs.existsSync(jarPath)) {
@@ -19,16 +24,17 @@ async function start() {
 
     // 2. Launch the Java process. The plugin only exposes MCP tools over stdio -
     // the LSP socket transport is disabled since nothing connects to it.
+    fs.mkdirSync(dataDir, { recursive: true });
     const javaArgs = [
         "-Xmx1024m",
         "-Djdk.util.zip.disableZip64ExtraFieldValidation=true",
         "-Dspring.config.location=classpath:/application.properties",
         "-Dspring.profiles.active=file-logging",
-        `-Dlogging.file.name=${path.join(__dirname, 'boot-ls.log')}`,
+        `-Dlogging.file.name=${path.join(dataDir, 'boot-ls.log')}`,
         "-Dlogging.level.root=INFO",
         "-Dspring.ai.mcp.server.stdio=true",
         "-Dlanguageserver.enabled=false",
-        `-Dspring.boot.ls.project.dir=${process.cwd()}`,
+        `-Dspring.boot.ls.project.dir=${projectDir}`,
         "-jar",
         jarPath
     ];

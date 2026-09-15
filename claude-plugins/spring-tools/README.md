@@ -60,7 +60,7 @@ claude
 Then, ask Claude a test query to verify the MCP integration. For example:
 > "Check the project diagnostics for CoffeeController.java."
 
-Claude will wait for the language server to initialize, call the `getProjectDiagnostics` MCP tool, and summarize the exact Spring Boot warnings and quick fixes it reports.
+Claude calls the `getProjectDiagnostics` MCP tool and summarizes the exact Spring Boot warnings and quick fixes it reports. Note that the MCP server is available within a few seconds, but the project itself only shows up in `getProjectList` once the language server has resolved the Maven/Gradle project model - a few seconds with a warm dependency cache, up to a couple of minutes on a cold one. The `validate` skill retries `getProjectList` while the list is still empty.
 
 ### 5. Local Testing
 
@@ -70,7 +70,7 @@ We maintain a local marketplace configuration (`claude-plugins/.claude-plugin/ma
    ```bash
    ./update-local-jars.sh
    ```
-2. Add the local `claude-plugins` directory as a marketplace (run this from the `sts4` root directory):
+2. Add the local `claude-plugins` directory as a marketplace (run this from the repository root):
    ```bash
    claude plugin marketplace add ./claude-plugins
    ```
@@ -136,7 +136,7 @@ Nested JSON matching the VSCode `boot-java` / `spring-boot` configuration struct
 
 The full list of available categories and problem codes is embedded in the language server JAR as `problem-types.json`. They are the same keys used in the VSCode extension's settings.
 
-Settings are applied once at startup. You must restart the language server (and therefore Claude Code) for changes to take effect.
+Settings are applied once at startup. You must restart the language server for changes to take effect: restart Claude Code, or reconnect the `spring-tools-mcp` server from the `/mcp` menu.
 
 ## What the language server provides
 
@@ -145,26 +145,36 @@ Via MCP tools:
 - **Diagnostics** — Spring-specific warnings and quick fixes (missing annotations, incorrect bean wiring, etc.), including version validation results
 - **Project insight** — bean, component, and request-mapping lookups; resolved project classpath
 
-Via hooks (`hooks/hooks.json`), the plugin also tracks file and project changes on disk to keep its internal index up to date, and exposes a command to refresh the index manually. These hooks are gated to Java/Kotlin/Groovy source files and build/config files (`.java`, `.kt`, `.kts`, `.groovy`, `.xml`, `.properties`, `.yml`, `.yaml`, `.gradle`) — edits to unrelated files don't trigger them. The workspace-refresh hook fires only on `git` commands.
+Via skills (invoked as `/spring-tools:<name>`, or automatically by Claude when relevant):
+
+- **`validate`** — collects the Spring Tools diagnostics for a project and drives the fixes
+- **`quickfix`** — looks up the explanation and fix instructions for a diagnostic code in `explanations/` and applies them
+- **`create-spring-boot-project`** — scaffolds a new project from start.spring.io
+- **`refresh`** — forces the language server to re-index the workspace from disk
+
+Via hooks (`hooks/hooks.json`), the plugin also tracks file and project changes on disk to keep its internal index up to date. The file-change hooks fire after `Edit`/`Write` tool calls on Java/Kotlin/Groovy source files and build/config files (`.java`, `.kt`, `.kts`, `.groovy`, `.xml`, `.properties`, `.yml`, `.yaml`, `.gradle`) — edits to unrelated files don't trigger them. The workspace-refresh hook fires after `git` and `rm` shell commands (and their PowerShell equivalents), since those can change files without going through Claude's file tools.
 
 ## Plugin structure
 
 ```
 spring-tools/
 ├── .claude-plugin/
-│   └── plugin.json          # Plugin manifest (MCP server config)
+│   └── plugin.json          # Plugin manifest (metadata + MCP server config)
 ├── launcher.js              # Node.js script that downloads the JAR (if missing) and starts Java
 ├── install.js               # Node.js script that downloads the JAR
-├── hooks/                   # Hooks that notify the language server of file/project changes
+├── hooks/
+│   └── hooks.json           # Hooks that notify the language server of file/project changes
 ├── language-server/         # Populated by install.js on first run (gitignored)
 │   └── spring-boot-language-server-standalone-exec.jar
-├── skills/                  # Claude Code skills
+├── skills/                  # Claude Code skills, namespaced as /spring-tools:<name>
 │   ├── validate/
-│   └── quickfix/
+│   ├── quickfix/
+│   ├── create-spring-boot-project/
+│   └── refresh/
 ├── explanations/            # Markdown files with problem explanations and fixes
 └── README.md
 ```
 
 ## How it works
 
-Claude Code parses the MCP configuration in `plugin.json` at startup. This triggers `launcher.js`, which checks if the heavy Java JAR is downloaded. If not, it executes `install.js` to download it from Spring's CDN. Then it boots the standalone Spring Tools Language Server, instructing it to expose its MCP tools over `stdio` (the language server's own LSP socket transport is disabled, since nothing in this plugin connects to it).
+Claude Code parses the MCP configuration in `plugin.json` at startup. This triggers `launcher.js`, which checks if the heavy Java JAR is downloaded. If not, it executes `install.js` to download it from Spring's CDN. Then it boots the standalone Spring Tools Language Server, instructing it to expose its MCP tools over `stdio` (the language server's own LSP socket transport is disabled, since nothing in this plugin connects to it). The server indexes the project root Claude Code passes in `CLAUDE_PROJECT_DIR` and writes its log to `boot-ls.log` in the plugin's persistent data directory (`CLAUDE_PLUGIN_DATA`, normally `~/.claude/plugins/data/<plugin-id>/`).
