@@ -29,6 +29,13 @@ const installer = require(join(pluginRoot, 'install.js'));
 const { JAR_NAME, ensureJar, downloadUrls, assertAllowedUrl, proxyFor, hostMatchesNoProxy, pluginVersion, defaultInstallDir, parseArgs } = installer;
 
 const version = pluginVersion(pluginRoot);
+// Download-failure tests must not resolve the build fallback against this file's own checkout
+// (findSourceRoot would find it and kick off a real, multi-minute Maven build); give them a
+// pluginRoot whose parent directories hold no source checkout.
+const isolatedRoot = mkdtempSync(join(tmpdir(), 'spring-tools-isolated-'));
+const isolatedPluginRoot = join(isolatedRoot, 'agent-plugins', 'spring-tools');
+mkdirSync(isolatedPluginRoot, { recursive: true });
+writeFileSync(join(isolatedPluginRoot, 'plugin.json'), JSON.stringify({ version }));
 const jarBytes = randomBytes(3 * 1024 * 1024 + 123);
 const jarDigest = createHash('sha256').update(jarBytes).digest('hex');
 const state = { mode: 'ok', requests: [] };
@@ -94,11 +101,16 @@ before(async () => {
     if (loopbackUnavailable) return;
     base = `http://127.0.0.1:${server.address().port}/spring-tools`;
     process.env.SPRING_TOOLS_LS_DOWNLOAD_BASE = base;
+    // This test file runs inside a real Spring Tools checkout, which the build fallback would
+    // otherwise find and use to run a real Maven build; point it at a directory with no checkout
+    // so download-failure tests see a clean failure instead of a multi-minute reactor build.
+    process.env.SPRING_TOOLS_SOURCE_DIR = join(tmpdir(), 'spring-tools-no-source-checkout');
 });
 
 after(() => {
     if (server?.listening) server.close();
     delete process.env.SPRING_TOOLS_LS_DOWNLOAD_BASE;
+    delete process.env.SPRING_TOOLS_SOURCE_DIR;
 });
 
 let dest;
@@ -136,7 +148,7 @@ test('--if-missing is a no-op when the JAR is already there', async () => {
 test('negative control: a checksum mismatch leaves no JAR and no partial file behind', async (t) => {
     if (skipWithoutLoopback(t)) return;
     state.mode = 'bad-sum';
-    await assert.rejects(ensureJar({ pluginRoot, dest, log: quiet }), /Checksum mismatch/);
+    await assert.rejects(ensureJar({ pluginRoot: isolatedPluginRoot, dest, log: quiet }), /Checksum mismatch/);
     assert.ok(!existsSync(join(dest, JAR_NAME)), 'a JAR that failed verification must not be installed');
     assert.deepEqual(leftovers(), []);
 });
@@ -144,7 +156,7 @@ test('negative control: a checksum mismatch leaves no JAR and no partial file be
 test('accepts the sha256sum "digest  filename" checksum format', async (t) => {
     if (skipWithoutLoopback(t)) return;
     state.mode = 'sha256sum-format';
-    await ensureJar({ pluginRoot, dest, log: quiet });
+    await ensureJar({ pluginRoot: isolatedPluginRoot, dest, log: quiet });
     assert.ok(readFileSync(join(dest, JAR_NAME)).equals(jarBytes));
 });
 
@@ -184,8 +196,8 @@ test('falls back to building the standalone JAR from an available source checkou
     mkdirSync(target, { recursive: true });
     writeFileSync(join(localPlugin, 'plugin.json'), JSON.stringify({ version }));
     writeFileSync(join(root, 'headless-services', 'pom.xml'), '<project/>');
-    writeFileSync(join(root, 'mvnw'), `#!/bin/sh\nprintf "Maven build output\\n"\nmkdir -p headless-services/spring-boot-language-server-standalone/target\nprintf built > headless-services/spring-boot-language-server-standalone/target/test-standalone-exec.jar\n`);
-    chmodSync(join(root, 'mvnw'), 0o755);
+    writeFileSync(join(root, 'headless-services', 'mvnw'), `#!/bin/sh\nprintf "Maven build output\\n"\nmkdir -p spring-boot-language-server-standalone/target\nprintf built > spring-boot-language-server-standalone/target/test-standalone-exec.jar\n`);
+    chmodSync(join(root, 'headless-services', 'mvnw'), 0o755);
     try {
         const script = `require(${JSON.stringify(join(pluginRoot, 'install.js'))}).ensureJar({
             pluginRoot: ${JSON.stringify(localPlugin)}, dest: ${JSON.stringify(dest)}
@@ -270,4 +282,5 @@ after(() => {
     for (const dir of readdirSync(tmpdir()).filter((n) => n.startsWith('spring-tools-install-'))) {
         rmSync(join(tmpdir(), dir), { recursive: true, force: true });
     }
+    rmSync(isolatedRoot, { recursive: true, force: true });
 });

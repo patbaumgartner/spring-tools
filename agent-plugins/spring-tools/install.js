@@ -296,7 +296,7 @@ function findSourceRoot(pluginRoot, env = process.env) {
     const candidates = [env.SPRING_TOOLS_SOURCE_DIR, path.resolve(pluginRoot, '..', '..')].filter(Boolean);
     return candidates.map((candidate) => path.resolve(candidate)).find((root) =>
         fs.existsSync(path.join(root, 'headless-services', 'pom.xml'))
-        && (fs.existsSync(path.join(root, 'mvnw')) || fs.existsSync(path.join(root, 'mvnw.cmd'))));
+        && (fs.existsSync(path.join(root, 'headless-services', 'mvnw')) || fs.existsSync(path.join(root, 'headless-services', 'mvnw.cmd'))));
 }
 
 function buildJar(pluginRoot, dest, log) {
@@ -304,11 +304,12 @@ function buildJar(pluginRoot, dest, log) {
     if (!sourceRoot) {
         throw new Error('No Spring Tools source checkout found for a local build. Set SPRING_TOOLS_SOURCE_DIR to the repository root, or install the JAR manually and set SPRING_TOOLS_LS_JAR.');
     }
-    const wrapper = path.join(sourceRoot, process.platform === 'win32' ? 'mvnw.cmd' : 'mvnw');
-    const args = ['-f', 'headless-services/pom.xml', '-pl', 'spring-boot-language-server-standalone', '-am', '-DskipTests', 'package'];
+    const servicesDir = path.join(sourceRoot, 'headless-services');
+    const wrapper = path.join(servicesDir, process.platform === 'win32' ? 'mvnw.cmd' : 'mvnw');
+    const args = ['-pl', 'spring-boot-language-server-standalone', '-am', '-DskipTests', 'package'];
     log(`Building Spring Boot Language Server from ${sourceRoot}`);
     // Maven must not read MCP requests or write build output to the MCP stdout transport.
-    const result = spawnSync(wrapper, args, { cwd: sourceRoot, stdio: ['ignore', 2, 2], shell: process.platform === 'win32' });
+    const result = spawnSync(wrapper, args, { cwd: servicesDir, stdio: ['ignore', 2, 2], shell: process.platform === 'win32' });
     if (result.error || result.status !== 0) {
         throw new Error(`Local language server build failed${result.error ? `: ${result.error.message}` : ` (exit code ${result.status})`}`);
     }
