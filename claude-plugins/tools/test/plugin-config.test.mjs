@@ -158,7 +158,7 @@ test('the analysis skills grant exactly the tools their body walks through', () 
     const expectations = {
         beans: ['getProjectList', 'getBeanDetails', 'findBeansByType', 'getBeanUsageInfo'],
         endpoints: ['getProjectList', 'getRequestMappings', 'findRequestMappingsByMethod'],
-        architecture: ['getProjectList', 'getLogicalStructure', 'getStereotypesList', 'findComponentsByStereotype', 'getListOfComponentsAndTheirStereotypes',
+        architecture: ['getProjectList', 'getLogicalStructure', 'getStructureDependencies', 'getStereotypesList', 'findComponentsByStereotype', 'getListOfComponentsAndTheirStereotypes',
             'captureLogicalStructureBaseline', 'getLogicalStructureChanges', 'getLogicalStructureBaselineHistory', 'clearLogicalStructureBaseline'],
         'spring-versions': ['getProjectList', 'getSpringBootVersion', 'getLatestReleaseInformation', 'getLatestBootVersionsFromMavenRepo', 'getReleases', 'getGenerations', 'getUpcomingReleases'],
         'project-info': ['getProjectList', 'getJavaVersion', 'getSpringBootVersion', 'getResolvedProjectClasspath'],
