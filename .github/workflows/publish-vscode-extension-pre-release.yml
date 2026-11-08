@@ -61,18 +61,32 @@ jobs:
       - name: Publish to VSCode Marketplace
         id: publish-pre-release
         working-directory: vscode-extensions/${{ inputs.extension-name }}
+        env:
+          VSCE_PUBLISH_TOKEN: ${{ secrets.VSCE_PUBLISH_TOKEN }}
         run: |
+          if [ -z "$VSCE_PUBLISH_TOKEN" ]; then
+            echo "::error::Secret VSCE_PUBLISH_TOKEN is not set in this repository - cannot publish to the VS Code Marketplace."
+            echo "::error::Add it under Settings > Secrets and variables > Actions. Previous failures showed 'Invalid version <vsix>' because an empty -p argument swallowed --packagePath."
+            exit 1
+          fi
           vsix_file=`ls ../../vsix | head -n 1`
           echo "VSCode VSIX pre-release file to publish ${vsix_file}"
-          vsce publish --pre-release -p ${{ secrets.VSCE_PUBLISH_TOKEN }} --packagePath ../../vsix/$vsix_file
+          vsce publish --pre-release -p "$VSCE_PUBLISH_TOKEN" --packagePath ../../vsix/$vsix_file
       - name: Publish to Eclipse Open VSX
         id: publish-pre-release-ovsx
         working-directory: vscode-extensions/${{ inputs.extension-name }}
+        env:
+          OVSX_PUBLISH_TOKEN: ${{ secrets.OVSX_PUBLISH_TOKEN }}
         run: |
+          if [ -z "$OVSX_PUBLISH_TOKEN" ]; then
+            echo "::error::Secret OVSX_PUBLISH_TOKEN is not set in this repository - cannot publish to Open VSX."
+            echo "::error::Add it under Settings > Secrets and variables > Actions."
+            exit 1
+          fi
           npm install --global ovsx
           vsix_file=`ls ../../vsix | head -n 1`
           echo "Open-VSX VSIX pre-release file to publish ${vsix_file}"
-          ovsx publish --pre-release -p ${{ secrets.OVSX_PUBLISH_TOKEN }} --packagePath ../../vsix/$vsix_file
+          ovsx publish --pre-release -p "$OVSX_PUBLISH_TOKEN" --packagePath ../../vsix/$vsix_file
           
       - name: Commit and Push Changelog
         env:
