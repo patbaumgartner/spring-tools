@@ -1,9 +1,14 @@
 version: 2
 updates:
-  - package-ecosystem: "github-actions"
-    target-branch: "main"
-    directory: "/"
-    schedule:
-      interval: "weekly"
-    labels:
-      - "dependencies"
+- package-ecosystem: github-actions
+  target-branch: main
+  directory: /
+  schedule:
+    interval: weekly
+  labels:
+  - dependencies
+groups:
+  multi-step-actions:
+    patterns:
+    - github/codeql-action/*
+    - spring-io/spring-release-actions/*
