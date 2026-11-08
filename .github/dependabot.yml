@@ -7,8 +7,8 @@ updates:
     interval: weekly
   labels:
   - dependencies
-groups:
-  multi-step-actions:
-    patterns:
-    - github/codeql-action/*
-    - spring-io/spring-release-actions/*
+  groups:
+    multi-step-actions:
+      patterns:
+      - github/codeql-action/*
+      - spring-io/spring-release-actions/*
