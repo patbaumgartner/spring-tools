@@ -19,6 +19,9 @@
             <plugin>
                 <groupId>org.codehaus.mojo</groupId>
                 <artifactId>exec-maven-plugin</artifactId>
+                <!-- pinned: 3.7.0 resolves './gradlew' to the bash script on Windows (CreateProcess error=193);
+                     3.6.4 lets Windows resolve gradlew.bat via PATHEXT -->
+                <version>3.6.4</version>
                 <executions>
                     <execution>
                         <id>test</id>
