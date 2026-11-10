@@ -35,6 +35,8 @@ env:
   AWS_S3_BUCKET: ${{ secrets.CDN_BUCKET }}/spring-tools
   DOWNLOAD_URL_ROOT: https://cdn.spring.io/spring-tools
   CDN_BUCKET: ${{ secrets.CDN_BUCKET }}
+  HAS_CDN_BUCKET: ${{ secrets.CDN_BUCKET != '' }}
+  HAS_GPG_KEY: ${{ secrets.GPG_PRIVATE_KEY != '' }}
 
 jobs:
 
@@ -61,6 +63,7 @@ jobs:
       - name: Enforce https instead of http
         run: ./nohttp.sh
       - name: Install GPG key
+        if: ${{ env.HAS_GPG_KEY == 'true' }}
         run: |
           echo "${{ secrets.GPG_PRIVATE_KEY }}" > gpg.asc
           echo "${{ secrets.GPG_PASSPHRASE }}" | gpg --batch --yes --passphrase-fd 0 --import gpg.asc
@@ -78,6 +81,8 @@ jobs:
           gpg_keyname: ${{ secrets.GPG_KEYID }}
         run: |
           java -version
+          gpg_profile="-Pgpg.sign"
+          if [[ -z "$gpg_keyname" ]]; then gpg_profile=""; fi
           sts_ls_version=${{ inputs.sts-language-servers-version }}
           sts_ls_version_param=""
           if ! [[ -z ${sts_ls_version} ]]; then
@@ -89,7 +94,7 @@ jobs:
             p2_qualifier_param="-Dp2.qualifier=${p2_qualifier}"
           fi
           cd eclipse-distribution
-          ./mvnw --batch-mode -U clean install -P${{ inputs.eclipse_profile }} -P${{ inputs.build_type }} $sts_ls_version_param $p2_qualifier_param -Pgitactions -Pgpg.sign \
+          ./mvnw --batch-mode -U clean install -P${{ inputs.eclipse_profile }} -P${{ inputs.build_type }} $sts_ls_version_param $p2_qualifier_param -Pgitactions $gpg_profile \
           -Dmaven.repo.local=~/.m2/repository-signed -Dmaven.test.skip=true -Declipse.p2.mirrors=false -Dtycho.localArtifacts=ignore -Dp2.replaceQualifier=true \
           -Dskip.eclipserun.proxies=false -Dtycho.equinox.resolver.uses=true \
           -Dmaven.wagon.httpconnectionManager.ttlSeconds=120 \
@@ -130,6 +135,7 @@ jobs:
           echo "Product dir: ${product_dir}"
           echo "product_dir=$product_dir" >> $GITHUB_OUTPUT
       - name: Upload P2 Repo Build Artifacts
+        if: ${{ env.HAS_CDN_BUCKET == 'true' }}
         run: |
           cd ${{ github.workspace }}/${{ steps.product-dir.outputs.product_dir }}/target
           p2_path=${{ steps.s3-paths.outputs.p2_path }}
@@ -137,6 +143,7 @@ jobs:
           aws s3 rm s3://$AWS_S3_BUCKET/$p2_path/ --recursive
           aws s3 cp ./repository/ s3://$AWS_S3_BUCKET/$p2_path/ --recursive --no-progress
       - name: Upload Linux Distro Build Artifacts
+        if: ${{ env.HAS_CDN_BUCKET == 'true' }}
         run: |
           cd ${{ github.workspace }}/${{ steps.product-dir.outputs.product_dir }}/target/products
           files=`ls spring-tools-for-eclipse*linux*.tar.gz`
@@ -162,12 +169,13 @@ jobs:
           echo "Uploading new Linux .tar.gz files to s3..."
           aws s3 cp . s3://$AWS_S3_BUCKET/$dist_path --recursive --exclude "*" --include "spring-tools-for-eclipse*linux*.tar.gz*" --exclude "*/*" --no-progress
       - name: Update Nightly Distro Downloads page
-        if: ${{ inputs.build_type == 'snapshot' }}
+        if: ${{ inputs.build_type == 'snapshot' && env.HAS_CDN_BUCKET == 'true' }}
         run: |
           eclipse_profile=${{ inputs.eclipse_profile }}
           eclipse_version=${eclipse_profile:0:2}.${eclipse_profile:2}
           ${{ github.workspace }}/.github/scripts/update-distro-download-page.sh ${{ steps.s3-paths.outputs.dist_path }} $eclipse_version ${{ inputs.build_type }} $AWS_S3_BUCKET $DOWNLOAD_URL_ROOT
       - name: Upload Build Artifacts for Signing
+        if: ${{ env.HAS_CDN_BUCKET == 'true' }}
         run: |
           echo "Uploading Win Zips and OSX tar.gz to S3 for signing..."
           id=${{ inputs.eclipse_profile }}-${{ inputs.build_type }}-${{ github.run_id }}
@@ -177,9 +185,11 @@ jobs:
       dist_path: ${{ steps.s3-paths.outputs.dist_path }}
       p2_path: ${{ steps.s3-paths.outputs.p2_path }}
       version: ${{ steps.project-version.outputs.version }}
+      has_cdn_bucket: ${{ env.HAS_CDN_BUCKET }}
 
   sign-win-distros:
     needs: [ eclipse-distro-build ]
+    if: ${{ needs.eclipse-distro-build.outputs.has_cdn_bucket == 'true' }}
     runs-on: ubuntu-latest
     steps:
       - name: Setup AWS CLI 2.22
@@ -238,6 +248,7 @@ jobs:
 
   sign-osx-distros:
     needs: [ eclipse-distro-build ]
+    if: ${{ needs.eclipse-distro-build.outputs.has_cdn_bucket == 'true' }}
     runs-on: macos-15
     steps:
       - name: Setup AWS CLI 2.22
@@ -335,7 +346,7 @@ jobs:
 
   purge_cache:
     needs: [ eclipse-distro-build, sign-win-distros, sign-osx-distros ]
-    if: ${{ always() && inputs.build_type != 'snapshot' && contains(join(needs.*.result, ','), 'success')}}
+    if: ${{ always() && inputs.build_type != 'snapshot' && needs.eclipse-distro-build.outputs.has_cdn_bucket == 'true' && contains(join(needs.*.result, ','), 'success')}}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # 7.0.1
@@ -434,7 +445,7 @@ jobs:
 
   cleanup:
     needs: [ eclipse-distro-build, sign-win-distros, sign-osx-distros ]
-    if: ${{ always() }}
+    if: ${{ always() && needs.eclipse-distro-build.outputs.has_cdn_bucket == 'true' }}
     runs-on: ubuntu-latest
     steps:
       - name: Remove Temp Build Artifacts from S3
