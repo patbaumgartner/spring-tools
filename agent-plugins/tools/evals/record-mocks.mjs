@@ -20,13 +20,12 @@
 //
 //   node agent-plugins/tools/evals/record-mocks.mjs [--project-src <dir>]
 
-import { spawn } from 'node:child_process';
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir, homedir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
-import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
+import { startMcpStdioClient } from '../lib/mcp-stdio-client.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(here, '..', '..', '..');
@@ -63,32 +62,13 @@ const projectName = basename(projectSrc);
 mkdirSync(dataDir, { recursive: true });
 cpSync(projectSrc, join(workspace, projectName), { recursive: true, filter: (src) => !/[\\/](target|build|\.git)$/.test(src) });
 
-const child = spawn(process.execPath, [join(pluginDir, 'launcher.js')], {
-    env: { ...process.env, CLAUDE_PROJECT_DIR: workspace, CLAUDE_PLUGIN_DATA: dataDir, CLAUDE_PLUGIN_ROOT: pluginDir },
-    stdio: ['pipe', 'pipe', 'inherit'],
-});
-const childExited = new Promise((resolvePromise) => child.once('exit', resolvePromise));
-const pending = new Map();
-let nextId = 1;
-createInterface({ input: child.stdout }).on('line', (line) => {
-    let message;
-    try { message = JSON.parse(line); } catch { return; }
-    if (message.id !== undefined && pending.has(message.id)) {
-        pending.get(message.id)(message);
-        pending.delete(message.id);
-    }
-});
-const request = (method, params, timeoutMs = 120000) => new Promise((resolvePromise, reject) => {
-    const id = nextId++;
-    const timer = setTimeout(() => reject(new Error(`timeout waiting for ${method}`)), timeoutMs);
-    pending.set(id, (message) => { clearTimeout(timer); resolvePromise(message); });
-    child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id, method, params })}\n`);
-});
+const client = startMcpStdioClient({ pluginDir, workspace, dataDir, inheritStderr: true });
+const { child, childExited, request, notify } = client;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const call = async (name, toolArgs = {}) => {
-    const response = await request('tools/call', { name, arguments: toolArgs });
+    const { response, text } = await client.call(name, toolArgs);
     if (response.error) throw new Error(`${name}: ${JSON.stringify(response.error)}`);
-    return (response.result?.content ?? []).map((c) => c.text ?? JSON.stringify(c)).join('\n');
+    return text;
 };
 async function pollUntil(fn, predicate, attempts, intervalMs) {
     let value;
@@ -121,7 +101,7 @@ const exact = { projectName };
 
 try {
     await request('initialize', { protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: 'record-mocks', version: '0' } });
-    child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized', params: {} })}\n`);
+    notify('notifications/initialized', {});
 
     const tools = await request('tools/list', {});
     writeFileSync(join(stagedMocksDir, '_tools.json'), `${JSON.stringify({ tools: tools.result.tools }, null, 2)}\n`);

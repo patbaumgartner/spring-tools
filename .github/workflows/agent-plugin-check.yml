@@ -91,6 +91,10 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # 7.0.0
         with:
           node-version: 22
+      - name: Install plugin tooling dependencies
+        run: npm ci --prefix agent-plugins/tools --no-audit --no-fund --ignore-scripts
+      - name: Type-check installer and launcher JavaScript
+        run: npm --prefix agent-plugins/tools run typecheck
       - name: Check explanation playbooks (coverage, structure, cross-references, coverage table)
         run: node agent-plugins/tools/check-explanations.mjs --require-all --todo
       - name: Check plugin configuration and cross-host adapters

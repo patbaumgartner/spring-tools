@@ -19,13 +19,13 @@
 //
 // Prints one PASS/FAIL line per check and ends with "SMOKE PASSED" only when every check passed.
 
-import { execFileSync, spawn } from 'node:child_process';
+import { execFileSync } from 'node:child_process';
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
-import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
+import { startMcpStdioClient } from '../lib/mcp-stdio-client.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(here, '..', '..', '..');
@@ -92,39 +92,8 @@ const isProcessAlive = (pid) => {
     }
 };
 
-const child = spawn(process.execPath, [join(pluginDir, 'launcher.js')], {
-    env: { ...process.env, CLAUDE_PROJECT_DIR: workspace, CLAUDE_PLUGIN_DATA: dataDir, CLAUDE_PLUGIN_ROOT: pluginDir },
-    stdio: ['pipe', 'pipe', 'pipe'],
-});
-let stderr = '';
-child.stderr.on('data', (d) => { stderr += d; });
-
-const pending = new Map();
-let nextId = 1;
-const strayStdout = [];
-createInterface({ input: child.stdout }).on('line', (line) => {
-    if (!line.trim()) return;
-    let message;
-    try { message = JSON.parse(line); } catch { strayStdout.push(line); return; }
-    if (message.id !== undefined && pending.has(message.id)) {
-        pending.get(message.id)(message);
-        pending.delete(message.id);
-    }
-});
-
-function request(method, params, timeoutMs = 120000) {
-    const id = nextId++;
-    return new Promise((resolvePromise, reject) => {
-        const timer = setTimeout(() => reject(new Error(`timeout waiting for ${method} (id ${id})`)), timeoutMs);
-        pending.set(id, (message) => { clearTimeout(timer); resolvePromise(message); });
-        child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id, method, params })}\n`);
-    });
-}
-const notify = (method, params) => child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', method, params })}\n`);
-const call = async (name, toolArgs = {}) => {
-    const response = await request('tools/call', { name, arguments: toolArgs });
-    return { response, text: (response.result?.content ?? []).map((c) => c.text ?? JSON.stringify(c)).join('\n') };
-};
+const client = startMcpStdioClient({ pluginDir, workspace, dataDir });
+const { child, request, notify, call, strayStdout } = client;
 const projectNames = (text) => [...text.replace(/\\"/g, '"').matchAll(/"projectName"\s*:\s*"([^"]+)"/g)].map((m) => m[1]);
 const codesOf = (text) => [...new Set([...text.matchAll(/"code"\s*:\s*"([A-Za-z_0-9]+)"/g)].map((m) => m[1]))];
 function javaFilesUnder(directory) {
@@ -258,7 +227,7 @@ try {
     check(existsSync(join(dataDir, 'boot-ls.log')), `log written to CLAUDE_PLUGIN_DATA (${join(dataDir, 'boot-ls.log')})`);
     check(strayStdout.length === 0, `stdout carried only JSON-RPC (${strayStdout.length} stray line(s))`);
     if (strayStdout.length) console.log(`stray stdout: ${strayStdout.slice(0, 5).join(' | ')}`);
-    check(/\[spring-tools\] Using Java (\d+) from/.test(stderr), 'launcher reported the selected Java runtime on stderr');
+    check(/\[spring-tools\] Using Java (\d+) from/.test(client.stderr), 'launcher reported the selected Java runtime on stderr');
     const serverLog = readFileSync(join(dataDir, 'boot-ls.log'), 'utf8');
     check(/file watcher started for .* directories, \d+ ms quiet period/.test(serverLog), 'server log confirms the file watcher started for the workspace');
 } catch (error) {
@@ -282,7 +251,7 @@ try {
     }
     const failed = results.filter((r) => !r).length;
     if (failed) {
-        console.log(`--- launcher stderr (tail) ---\n${stderr.slice(-3000)}`);
+        console.log(`--- launcher stderr (tail) ---\n${client.stderr.slice(-3000)}`);
         console.log(`SMOKE FAILED: ${failed} of ${results.length} checks failed (workspace kept at ${work})`);
         process.exitCode = 1;
     } else {

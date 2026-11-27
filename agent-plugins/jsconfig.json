@@ -1,0 +1,19 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "commonjs",
+    "moduleResolution": "node",
+    "allowJs": true,
+    "checkJs": true,
+    "noEmit": true,
+    "strict": true,
+    "skipLibCheck": true,
+    "typeRoots": ["./tools/node_modules/@types"],
+    "types": ["node"]
+  },
+  "include": [
+    "spring-tools/install.js",
+    "spring-tools/launcher.js",
+    "spring-tools/lib/**/*.js"
+  ]
+}

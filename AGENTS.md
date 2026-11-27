@@ -94,7 +94,7 @@ cd agent-plugins
 ./update-local-jars.sh    # Rebuild and copy the standalone LS JAR into the plugin
 ```
 
-The same plugin source serves every host: `plugin.json` and `mcp.json` for Claude Code, `com.github.copilot/` for GitHub Copilot, `opencode/` for OpenCode, and `.agents/plugins/marketplace.json` as the Codex catalog pointing to it (not a second implementation). Plugin JavaScript uses four-space indentation; plugin tests use Node's `node:test` with `*.test.mjs` filenames.
+The same plugin source serves every host: `plugin.json` and `mcp.json` for Claude Code, `com.github.copilot/` for GitHub Copilot, `opencode/` for OpenCode, and `.agents/plugins/marketplace.json` as the Codex catalog pointing to it (not a second implementation). Plugin JavaScript uses four-space indentation and `// @ts-check`; run `npm ci --prefix agent-plugins/tools` followed by `npm --prefix agent-plugins/tools run typecheck` to check it. Plugin tests use Node's `node:test` with `*.test.mjs` filenames.
 
 Every diagnostic code needs a playbook `agent-plugins/spring-tools/explanations/<CODE>.md` and a row in `agent-plugins/research-notes/TODO_quickfixes.md`. Every MCP tool (`boot/mcp/*Tools.java`) must be reachable through a skill or hook and have a behavioral eval with a mock. When adding or renaming a problem type or an MCP tool, run from the repository root (details in `agent-plugins/spring-tools/README.md`):
 

@@ -77,6 +77,16 @@ Then, ask Claude a test query to verify the MCP integration. For example:
 
 Claude calls the `getProjectDiagnostics` MCP tool and summarizes the exact Spring Boot warnings and quick fixes it reports. Note that the MCP server is available within a few seconds, but the project itself only shows up in `getProjectList` once the language server has resolved the Maven/Gradle project model - a few seconds with a warm dependency cache, up to a couple of minutes on a cold one. The `validate` skill retries `getProjectList` while the list is still empty.
 
+#### Verify quick fixes
+
+Use a disposable Spring Boot project so that you can inspect and revert the edits. For a repeatable fixture with known Spring diagnostics, use a copy of `headless-services/spring-boot-language-server/src/test/resources/test-projects/sf7-validation` from this repository. From the disposable fixture directory, start your agent interactively with `SPRING_TOOLS_LS_JAR` set to the absolute path of the locally built JAR shown in step 4 below.
+
+1. Ask the agent to call `getProjectList` and then `getProjectDiagnostics` for the fixture's `projectName`, without editing anything. Record the diagnostic code, file path, text range and message that you want to fix.
+2. Ask the agent to use the `quickfix` skill with that exact code, file and range, and to apply one appropriate fix. In Claude Code you can also invoke `/spring-tools:quickfix <CODE> <file_path> <range>` directly. If the playbook offers multiple fixes and the appropriate choice is unclear, choose one explicitly before letting the agent edit.
+3. Inspect the resulting source diff, for example with `git diff -- <file_path>`, and run the project's relevant compilation or tests. The edit should be limited to the intended fix and the project should still build.
+4. Ask the agent to call `getProjectDiagnostics` again for the same `projectName` (or use the `validate` skill). Confirm that the original code, file and range no longer appear and review any remaining or newly reported diagnostics. The watcher normally indexes an edit within a second; retry after a short wait if the old finding is still present.
+5. Restore the disposable project after the check. Verifying only the playbook text or the initial diagnostic is not enough: a successful verification applies the source edit and confirms the follow-up diagnostic result.
+
 The published marketplace URLs retain the historical `claude-plugins` path for compatibility. The shared plugin source lives under `agent-plugins/` in this repository.
 
 ### 5. Local Testing
@@ -307,9 +317,15 @@ The codes come from the `*ProblemType` enums of the language server (`Boot2JavaP
 
 ### Keeping the playbooks consistent
 
-`agent-plugins/tools/` contains a Node.js checker and tests (Node 20+, no dependencies) that keep the playbooks and the plugin configuration in sync with the language server. Run them from the repository root:
+`agent-plugins/tools/` contains Node.js checks and tests (Node 20+) that keep the playbooks and the plugin configuration in sync with the language server. The checks have no runtime dependencies; TypeScript and the Node.js type declarations are development dependencies used to check the published JavaScript. Run them from the repository root:
 
 ```bash
+# install the development dependencies used for strict JavaScript type checking
+npm ci --prefix agent-plugins/tools
+
+# type-check install.js, launcher.js and their modules with TypeScript (no emitted files)
+npm --prefix agent-plugins/tools run typecheck
+
 # every code has a playbook, no orphan files, structure/cross-references valid, TODO table in sync
 node agent-plugins/tools/check-explanations.mjs --require-all --todo
 
@@ -393,8 +409,15 @@ spring-tools/
 │   │   └── spring-reviewer.agent.md   # Same agent, front matter Copilot understands
 │   └── hooks/
 │       └── hooks.json       # sessionStart JAR download
-├── launcher.js              # Node.js script that picks a Java 21+ runtime, downloads the JAR (if missing) and starts it
-├── install.js               # Node.js script that downloads and verifies the JAR (also run by the session-start hook)
+├── launcher.js              # Thin Node.js entry point that starts the language server
+├── install.js               # Thin Node.js entry point for the JAR installer CLI and public installer API
+├── lib/
+│   ├── download.js          # Checksum-verified downloads, redirects and HTTP proxy handling
+│   ├── install-lock.js      # Installer locking and stale partial-download cleanup
+│   ├── installer.js         # Plugin/version paths, installation and source-build fallback
+│   ├── java.js              # Java 21+ discovery and JVM option parsing
+│   ├── project-directory.js # Persistent data and workspace directory resolution
+│   └── server.js            # JVM arguments, server instructions and process lifecycle
 ├── hooks/
 │   └── hooks.json           # Claude Code hooks: SessionStart JAR download + notifications about Claude's file/project changes
 ├── agents/
@@ -417,7 +440,7 @@ spring-tools/
 
 The manifests describe one plugin for different hosts. `install.js` stores the checksum-verified JAR in the persistent data directory, isolated under the plugin version; it does not write into the installed plugin tree. `check-plugin-config.mjs` fails if shared metadata drifts, if a reviewer adapter differs from `skills/spring-review/SKILL.md`, if `mcp.json` stops launching `launcher.js`, or if Codex loses its explicit no-hooks declaration. Run `node agent-plugins/tools/sync-agent-adapters.mjs --write` after changing the shared review procedure to refresh Claude, Copilot and OpenCode adapters. Hooks cannot be one shared file: Claude supports MCP-tool hooks, Copilot supports command hooks, Codex explicitly disables hook discovery and relies on the language-server watcher, and OpenCode does not load plugin hooks. Codex and Copilot consume the portable root `plugin.json`, `mcp.json`, and `skills/`, so those capabilities are defined once.
 
-The sibling directory `agent-plugins/tools/` (not part of the published plugin) holds `check-explanations.mjs`, `check-plugin-config.mjs`, `check-eval-runners.mjs`, `lib/plugin-config.mjs`, the `test/` suite, the `smoke/mcp-smoke.mjs` end-to-end test, and the `evals/` suite, recorder and host runners.
+The sibling directory `agent-plugins/tools/` (not part of the published plugin) holds `check-explanations.mjs`, `check-plugin-config.mjs`, `check-eval-runners.mjs`, shared checker/eval/MCP stdio helpers under `lib/`, the `test/` suite, the `smoke/mcp-smoke.mjs` end-to-end test, and the `evals/` suite, recorder and host runners.
 
 ## How it works
 
